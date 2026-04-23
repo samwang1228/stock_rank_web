@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import threading
+import time
 from dataclasses import dataclass
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from stock_db import (
     db_session,
@@ -52,11 +54,60 @@ def create_app() -> Flask:
             return sync_last_n_trading_days(
                 conn,
                 end_date=dt.date.today(),
-                keep_trading_days=60,
+                # 要算「60 個交易日前 -> 今日」漲幅，需要至少 61 個交易日資料
+                keep_trading_days=61,
                 cache_dir=cache_dir,
                 use_cache=True,
                 per_day_delay=float(os.environ.get("STOCK_FETCH_DELAY", "1.2")),
+                on_log=_log,
             )
+
+    sync_lock = threading.Lock()
+    sync_state: dict[str, object] = {
+        "running": False,
+        "started_at": None,
+        "finished_at": None,
+        "latest": None,
+        "error": None,
+        "logs": [],
+    }
+
+    def _log(line: str) -> None:
+        # keep last 500 lines
+        logs: list[str] = sync_state["logs"]  # type: ignore[assignment]
+        ts = dt.datetime.now().strftime("%H:%M:%S")
+        logs.append(f"[{ts}] {line}")
+        if len(logs) > 500:
+            del logs[: len(logs) - 500]
+
+    def _start_sync_background() -> None:
+        with sync_lock:
+            if bool(sync_state.get("running")):
+                return
+            sync_state["running"] = True
+            sync_state["started_at"] = dt.datetime.now().isoformat(timespec="seconds")
+            sync_state["finished_at"] = None
+            sync_state["latest"] = None
+            sync_state["error"] = None
+            sync_state["logs"] = []
+            _log("開始更新 DB…")
+
+        def runner():
+            t0 = time.time()
+            try:
+                _log("同步近 61 個交易日（含自動補齊/刪除舊資料）")
+                latest = sync_now()
+                _log(f"完成，同步至：{latest.isoformat()}")
+                sync_state["latest"] = latest.isoformat()
+            except Exception as e:  # noqa: BLE001
+                _log(f"失敗：{e}")
+                sync_state["error"] = str(e)
+            finally:
+                sync_state["running"] = False
+                sync_state["finished_at"] = dt.datetime.now().isoformat(timespec="seconds")
+                _log(f"總耗時 {time.time() - t0:.1f}s")
+
+        threading.Thread(target=runner, daemon=True).start()
 
     @app.get("/")
     def index():
@@ -64,10 +115,25 @@ def create_app() -> Flask:
 
     @app.post("/sync")
     def sync():
-        latest = sync_now()
-        ref = request.headers.get("Referer")
-        # 盡量回到來源頁，否則回排行榜
-        return redirect(ref or url_for("gainers", synced="1", asof=latest.isoformat()))
+        _start_sync_background()
+        return redirect(url_for("sync_status"))
+
+    @app.get("/sync/status")
+    def sync_status():
+        return render_template("sync_status.html")
+
+    @app.get("/sync/state")
+    def sync_state_api():
+        # shallow copy for json
+        payload = {
+            "running": bool(sync_state.get("running")),
+            "started_at": sync_state.get("started_at"),
+            "finished_at": sync_state.get("finished_at"),
+            "latest": sync_state.get("latest"),
+            "error": sync_state.get("error"),
+            "logs": list(sync_state.get("logs") or []),
+        }
+        return jsonify(payload)
 
     @app.get("/gainers")
     def gainers():

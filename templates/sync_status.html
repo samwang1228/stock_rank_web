@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <h2>更新DB</h2>
+  <p class="muted">此頁會即時顯示更新進度（每 1 秒刷新）。</p>
+
+  <div class="card">
+    <div id="meta" class="muted">讀取中…</div>
+    <pre id="logs" style="white-space: pre-wrap; margin: 8px 0 0 0;"></pre>
+  </div>
+
+  <script>
+    async function poll() {
+      const resp = await fetch('{{ url_for('sync_state_api') }}', {cache: 'no-store'});
+      const data = await resp.json();
+
+      const parts = [];
+      parts.push(`running: ${data.running}`);
+      if (data.started_at) parts.push(`started_at: ${data.started_at}`);
+      if (data.finished_at) parts.push(`finished_at: ${data.finished_at}`);
+      if (data.latest) parts.push(`latest: ${data.latest}`);
+      if (data.error) parts.push(`error: ${data.error}`);
+      document.getElementById('meta').textContent = parts.join(' | ');
+
+      document.getElementById('logs').textContent = (data.logs || []).join('\n');
+
+      if (!data.running) return;
+      setTimeout(poll, 1000);
+    }
+
+    poll();
+  </script>
+{% endblock %}
