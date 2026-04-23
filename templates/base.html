@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or '台股工具' }}</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 16px; }
+      nav a { margin-right: 12px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 14px; }
+      th { background: #f6f6f6; position: sticky; top: 0; }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .muted { color: #666; }
+      .container { max-width: 1200px; }
+      .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+      .linklike { text-decoration: none; }
+    </style>
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    <div class="container">
+      <nav class="row card">
+        <a href="{{ url_for('gainers') }}">漲幅排行</a>
+        <a href="{{ url_for('kline') }}">K線</a>
+        <a href="{{ url_for('near_ma') }}">接近MA</a>
+        <form method="post" action="{{ url_for('sync') }}" style="margin:0;">
+          <button type="submit">更新DB</button>
+        </form>
+      </nav>
+
+      {% block content %}{% endblock %}
+    </div>
+  </body>
+</html>

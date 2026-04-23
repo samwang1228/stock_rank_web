@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>今日收盤價接近 MA</h2>
+  {% if asof %}
+    <p class="muted">資料截至：{{ asof.strftime('%Y-%m-%d') }}；距離門檻：{{ '%.2f'|format(threshold_pct) }}%</p>
+  {% else %}
+    <p class="muted">DB 目前沒有資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  <div class="card row">
+    <span class="muted">排序：</span>
+    <a href="{{ url_for('near_ma', sort='d5', threshold=threshold_pct) }}">距離MA5</a>
+    <a href="{{ url_for('near_ma', sort='d20', threshold=threshold_pct) }}">距離MA20</a>
+    <a href="{{ url_for('near_ma', sort='d60', threshold=threshold_pct) }}">距離MA60</a>
+    <a href="{{ url_for('near_ma', sort='close', threshold=threshold_pct) }}">收盤</a>
+    <a href="{{ url_for('near_ma', sort='code', threshold=threshold_pct) }}">代號</a>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>代號</th>
+          <th>名稱</th>
+          <th class="num">收盤</th>
+          <th class="num">MA5</th>
+          <th class="num">距離% (5)</th>
+          <th class="num">MA20</th>
+          <th class="num">距離% (20)</th>
+          <th class="num">MA60</th>
+          <th class="num">距離% (60)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name }}</td>
+            <td class="num">{{ '%.2f'|format(r.close) }}</td>
+            <td class="num">{% if r.ma5 is not none %}{{ '%.2f'|format(r.ma5) }}{% else %}-{% endif %}</td>
+            <td class="num">{% if r.d5 is not none %}{{ '%.2f'|format(r.d5) }}{% else %}-{% endif %}</td>
+            <td class="num">{% if r.ma20 is not none %}{{ '%.2f'|format(r.ma20) }}{% else %}-{% endif %}</td>
+            <td class="num">{% if r.d20 is not none %}{{ '%.2f'|format(r.d20) }}{% else %}-{% endif %}</td>
+            <td class="num">{% if r.ma60 is not none %}{{ '%.2f'|format(r.ma60) }}{% else %}-{% endif %}</td>
+            <td class="num">{% if r.d60 is not none %}{{ '%.2f'|format(r.d60) }}{% else %}-{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
