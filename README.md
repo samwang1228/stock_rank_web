@@ -1,4 +1,4 @@
-# stock_ui（暫）
+# stock_ui
 
 Repo：
 - https://github.com/samwang1228/stock_rank_web.git
@@ -57,6 +57,24 @@ PORT=5001 python app.py
 - http://127.0.0.1:5000/gainers
 - http://127.0.0.1:5000/kline
 - http://127.0.0.1:5000/near-ma
+
+## Screenshots
+
+### 漲幅排行
+
+![近 N 交易日漲幅排行](img/Topk.png)
+
+### 接近 MA
+
+![今日收盤價接近 MA](img/closeMA.png)
+
+### 更新 DB（進度/Log）
+
+![更新 DB 狀態頁](img/db.png)
+
+### K 線
+
+![K 線（含均線與成交量）](img/image.png)
 
 資料會存到 `data/stock.db`（SQLite）。啟動後請按導覽列的「更新DB」按鈕，才會進行：
 - 自動偵測從今天往回補齊缺漏（抓取間有延遲避免被封）
