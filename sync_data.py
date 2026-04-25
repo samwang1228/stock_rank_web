@@ -28,6 +28,12 @@ def sync_last_n_trading_days(
         if on_log:
             on_log(msg)
 
+    # 清除誤存的週末資料（台股不在週末交易）
+    log("清理 DB：刪除週六/週日的資料（若有）")
+    with conn:
+        conn.execute("DELETE FROM bars WHERE strftime('%w', date) IN ('0','6')")
+        conn.execute("DELETE FROM day_meta WHERE strftime('%w', date) IN ('0','6')")
+
     def day_counts(d: dt.date) -> tuple[int, int] | None:
         row = conn.execute(
             "SELECT twse_count, tpex_count FROM day_meta WHERE date=?",

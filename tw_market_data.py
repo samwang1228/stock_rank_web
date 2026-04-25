@@ -295,6 +295,9 @@ def fetch_twse_daily_bars(
     cache_dir: str,
     use_cache: bool = True,
 ) -> list[DailyBar]:
+    # 台股不在週六/週日交易；避免週末端點回傳前一交易日而誤寫日期
+    if d.weekday() >= 5:
+        return []
     payload = _load_or_fetch_json(cache_dir, f"twse_{d:%Y%m%d}", _twse_daily_url(d), use_cache=use_cache)
     return _parse_twse_daily(payload, d)
 
@@ -358,6 +361,10 @@ def fetch_daily_bars(
     per_request_delay: float = 0.4,
 ) -> tuple[list[DailyBar], list[DailyBar]]:
     """回傳 (twse_bars, tpex_bars)。若該日非交易日通常兩者都為空。"""
+
+    # 台股不在週六/週日交易；直接視為非交易日
+    if d.weekday() >= 5:
+        return [], []
 
     twse_payload = _load_or_fetch_json(cache_dir, f"twse_{d:%Y%m%d}", _twse_daily_url(d), use_cache=use_cache)
     time.sleep(per_request_delay + random.random() * 0.2)
