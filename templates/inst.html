@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>上市法人買超排行</h2>
+
+  {% if asof %}
+    <p class="muted">
+      資料截至：{{ asof.strftime('%Y-%m-%d') }}
+      {% if used_dates %}；區間：{{ used_dates[0].strftime('%Y-%m-%d') }} ~ {{ used_dates[-1].strftime('%Y-%m-%d') }}（{{ days }} 交易日）{% endif %}
+    </p>
+  {% else %}
+    <p class="muted">DB 目前沒有資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  <div class="card row">
+    <span class="muted">期間：</span>
+    {% for w in windows %}
+      <a href="{{ url_for('inst_rank', days=w, inst=inst) }}">{{ w }}日</a>
+    {% endfor %}
+    <span class="muted">法人：</span>
+    {% for k, label in inst_options %}
+      <a href="{{ url_for('inst_rank', days=days, inst=k) }}">{{ label }}</a>
+    {% endfor %}
+    <span class="muted">（僅上市；買超以股數加總）</span>
+  </div>
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>代號</th>
+          <th>名稱</th>
+          <th class="num">買超股數</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td class="num">{{ loop.index }}</td>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name }}</td>
+            <td class="num">{{ '{:,}'.format(r.net) }}</td>
+          </tr>
+        {% endfor %}
+        {% if not rows %}
+          <tr>
+            <td colspan="4" class="muted">（沒有買超資料；請先更新 DB 或換區間/法人）</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

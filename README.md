@@ -57,6 +57,7 @@ PORT=5001 python app.py
 - http://127.0.0.1:5000/gainers
 - http://127.0.0.1:5000/kline
 - http://127.0.0.1:5000/near-ma
+- http://127.0.0.1:5000/inst
 
 ## Screenshots
 
@@ -75,6 +76,10 @@ PORT=5001 python app.py
 ### K 線
 
 ![K 線（含均線與成交量）](img/image.png)
+
+### 法人買超（上市）
+
+![上市法人買超排行](img/Three_Major.png)
 
 資料會存到 `data/stock.db`（SQLite）。啟動後請按導覽列的「更新DB」按鈕，才會進行：
 - 自動偵測從今天往回補齊缺漏（抓取間有延遲避免被封）

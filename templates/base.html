@@ -5,17 +5,74 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or '台股工具' }}</title>
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 16px; }
-      nav a { margin-right: 12px; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 14px; }
-      th { background: #f6f6f6; position: sticky; top: 0; }
-      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        margin: 0;
+        background: #f6f6f6;
+        color: #111;
+        line-height: 1.45;
+      }
+
+      a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+      a:hover { text-decoration-thickness: 2px; }
+
+      h2 { margin: 16px 0 8px 0; font-size: 20px; }
+      p { margin: 8px 0; }
+
       .muted { color: #666; }
-      .container { max-width: 1200px; }
+      .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
       .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-      .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+      .card { border: 1px solid #ddd; padding: 12px; border-radius: 10px; background: #fff; }
+      .spacer { height: 12px; }
+
+      nav.card { padding: 10px 12px; }
+      nav a { text-decoration: none; padding: 6px 8px; border-radius: 8px; }
+      nav a:hover { background: #f0f0f0; }
+      .nav-right { margin-left: auto; }
+
+      label { display: inline-flex; gap: 8px; align-items: center; }
+      input {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+        background: #fff;
+        min-width: 180px;
+      }
+      input:focus { outline: none; border-color: #bbb; }
+      button {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+        background: #f6f6f6;
+        cursor: pointer;
+      }
+      button:hover { background: #f0f0f0; }
+
+      table { border-collapse: collapse; width: 100%; background: #fff; }
+      th, td { border: 1px solid #ddd; padding: 8px 10px; font-size: 14px; white-space: nowrap; }
+      th { background: #f6f6f6; position: sticky; top: 0; z-index: 1; }
+      tbody tr:nth-child(2n) { background: #fbfbfb; }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+      .table-card { overflow: auto; }
       .linklike { text-decoration: none; }
+
+      pre.logs {
+        margin: 10px 0 0 0;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        background: #fbfbfb;
+        white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+        font-size: 13px;
+        max-height: 420px;
+        overflow: auto;
+      }
     </style>
     {% block head %}{% endblock %}
   </head>
@@ -25,10 +82,13 @@
         <a href="{{ url_for('gainers') }}">漲幅排行</a>
         <a href="{{ url_for('kline') }}">K線</a>
         <a href="{{ url_for('near_ma') }}">接近MA</a>
-        <form method="post" action="{{ url_for('sync') }}" style="margin:0;">
+        <a href="{{ url_for('inst_rank') }}">法人買超</a>
+        <form class="nav-right" method="post" action="{{ url_for('sync') }}" style="margin:0;">
           <button type="submit">更新DB</button>
         </form>
       </nav>
+
+      <div class="spacer"></div>
 
       {% block content %}{% endblock %}
     </div>

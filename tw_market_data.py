@@ -30,6 +30,18 @@ class DailyBar:
     market: str  # TWSE | TPEX
 
 
+@dataclass(frozen=True)
+class InstitutionTrade:
+    date: dt.date
+    code: str
+    name: str
+    foreign_net: int
+    trust_net: int
+    dealer_net: int
+    total_net: int
+    market: str  # TWSE
+
+
 def _to_roc_date(d: dt.date) -> str:
     return f"{d.year - 1911:03d}/{d.month:02d}/{d.day:02d}"
 
@@ -136,6 +148,67 @@ def _tpex_daily_url(d: dt.date) -> str:
 
 def _tpex_openapi_daily_url() -> str:
     return "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+
+
+def _twse_t86_url(d: dt.date) -> str:
+    # 三大法人買賣超日報（上市）
+    return f"https://www.twse.com.tw/fund/T86?response=json&date={d:%Y%m%d}&selectType=ALL"
+
+
+def _parse_twse_t86(payload: dict, d: dt.date) -> list[InstitutionTrade]:
+    if payload.get("stat") != "OK":
+        return []
+
+    fields = [str(x).strip() for x in payload.get("fields", [])]
+
+    def idx(name: str) -> int | None:
+        try:
+            return fields.index(name)
+        except ValueError:
+            return None
+
+    i_code = idx("證券代號")
+    i_name = idx("證券名稱")
+    i_foreign = idx("外陸資買賣超股數(不含外資自營商)")
+    i_trust = idx("投信買賣超股數")
+    i_dealer = idx("自營商買賣超股數")
+    i_total = idx("三大法人買賣超股數")
+
+    if None in {i_code, i_name, i_foreign, i_trust, i_dealer, i_total}:
+        return []
+
+    out: list[InstitutionTrade] = []
+    for row in payload.get("data", []) or []:
+        if not row:
+            continue
+        code = str(row[i_code]).strip()
+        if not CODE_RE.match(code):
+            continue
+        name = str(row[i_name]).strip()
+        if _is_derivative_like(name):
+            continue
+
+        foreign_net = _parse_int(row[i_foreign])
+        trust_net = _parse_int(row[i_trust])
+        dealer_net = _parse_int(row[i_dealer])
+        total_net = _parse_int(row[i_total])
+        if None in {foreign_net, trust_net, dealer_net, total_net}:
+            continue
+
+        out.append(
+            InstitutionTrade(
+                date=d,
+                code=code,
+                name=name,
+                foreign_net=int(foreign_net),
+                trust_net=int(trust_net),
+                dealer_net=int(dealer_net),
+                total_net=int(total_net),
+                market="TWSE",
+            )
+        )
+
+    return out
 
 
 def _is_derivative_like(name: str) -> bool:
@@ -300,6 +373,19 @@ def fetch_twse_daily_bars(
         return []
     payload = _load_or_fetch_json(cache_dir, f"twse_{d:%Y%m%d}", _twse_daily_url(d), use_cache=use_cache)
     return _parse_twse_daily(payload, d)
+
+
+def fetch_twse_institution_trades(
+    d: dt.date,
+    *,
+    cache_dir: str,
+    use_cache: bool = True,
+) -> list[InstitutionTrade]:
+    # 台股不在週六/週日交易；避免週末端點回傳前一交易日而誤寫日期
+    if d.weekday() >= 5:
+        return []
+    payload = _load_or_fetch_json(cache_dir, f"twse_t86_{d:%Y%m%d}", _twse_t86_url(d), use_cache=use_cache)
+    return _parse_twse_t86(payload, d)
 
 
 def fetch_tpex_latest_snapshot(

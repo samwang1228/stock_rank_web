@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
 
-from tw_market_data import DailyBar
+from tw_market_data import DailyBar, InstitutionTrade
 
 
 SCHEMA = """
@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS bars (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bars_code_date ON bars(code, date);
+
+CREATE TABLE IF NOT EXISTS inst_trades (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    market TEXT NOT NULL,
+    foreign_net INTEGER NOT NULL,
+    trust_net INTEGER NOT NULL,
+    dealer_net INTEGER NOT NULL,
+    total_net INTEGER NOT NULL,
+    PRIMARY KEY (date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inst_trades_code_date ON inst_trades(code, date);
 """
 
 
@@ -109,6 +123,33 @@ def upsert_bars(conn: sqlite3.Connection, d: dt.date, bars: list[DailyBar], *, f
         )
 
 
+def upsert_institution_trades(
+    conn: sqlite3.Connection,
+    d: dt.date,
+    trades: list[InstitutionTrade],
+) -> None:
+    date_s = _date_to_str(d)
+    with conn:
+        if not trades:
+            return
+        rows = [(
+            date_s,
+            t.code,
+            t.name,
+            t.market,
+            int(t.foreign_net),
+            int(t.trust_net),
+            int(t.dealer_net),
+            int(t.total_net),
+        ) for t in trades]
+        conn.executemany(
+            "INSERT INTO inst_trades(date, code, name, market, foreign_net, trust_net, dealer_net, total_net) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(date, code) DO UPDATE SET "
+            "name=excluded.name, market=excluded.market, foreign_net=excluded.foreign_net, trust_net=excluded.trust_net, dealer_net=excluded.dealer_net, total_net=excluded.total_net",
+            rows,
+        )
+
+
 def has_day(conn: sqlite3.Connection, d: dt.date) -> bool:
     cur = conn.execute("SELECT 1 FROM day_meta WHERE date=?", (_date_to_str(d),))
     return cur.fetchone() is not None
@@ -138,6 +179,10 @@ def prune_to_last_n_days(conn: sqlite3.Connection, keep_trading_days: int) -> No
     with conn:
         conn.execute(
             "DELETE FROM bars WHERE date NOT IN (SELECT date FROM day_meta ORDER BY date DESC LIMIT ?)",
+            (int(keep_trading_days),),
+        )
+        conn.execute(
+            "DELETE FROM inst_trades WHERE date NOT IN (SELECT date FROM day_meta ORDER BY date DESC LIMIT ?)",
             (int(keep_trading_days),),
         )
         conn.execute(
@@ -210,6 +255,63 @@ def select_closes_for_last_n_trading_days(conn: sqlite3.Connection, n: int) -> l
     dates = [_str_to_date(r["date"]) for r in cur_dates]
     dates.sort()
     return select_closes_for_dates(conn, dates)
+
+
+def select_institution_net_buy_rank(
+    conn: sqlite3.Connection,
+    *,
+    days: int,
+    inst: str,
+    limit: int = 200,
+) -> tuple[list[sqlite3.Row], list[dt.date]]:
+    """回傳 (rows, used_dates)。
+
+    rows 欄位：code, name, net
+    used_dates：本次彙總使用到的交易日（asc）
+    """
+
+    inst = (inst or "").strip().lower()
+    col_map = {
+        "foreign": "foreign_net",
+        "trust": "trust_net",
+        "dealer": "dealer_net",
+        "total": "total_net",
+    }
+    col = col_map.get(inst)
+    if not col:
+        raise ValueError(f"Unknown inst: {inst}")
+
+    days_i = int(days)
+    if days_i <= 0:
+        raise ValueError("days must be positive")
+
+    cur_dates = conn.execute("SELECT date FROM day_meta ORDER BY date DESC LIMIT ?", (days_i,)).fetchall()
+    used_dates = [_str_to_date(r["date"]) for r in cur_dates]
+    used_dates.sort()
+    if not used_dates:
+        return [], []
+
+    # 只彙總 day_meta 內的最後 N 個交易日，避免 holiday/weekend
+    rows = conn.execute(
+        f"""
+        WITH last_dates AS (
+          SELECT date FROM day_meta ORDER BY date DESC LIMIT ?
+        )
+        SELECT it.code AS code,
+               MAX(it.name) AS name,
+               SUM(it.{col}) AS net
+        FROM inst_trades it
+        JOIN last_dates ld ON ld.date = it.date
+        WHERE it.market = 'TWSE'
+        GROUP BY it.code
+        HAVING net > 0
+        ORDER BY net DESC, it.code ASC
+        LIMIT ?
+        """,
+        (days_i, int(limit)),
+    ).fetchall()
+
+    return rows, used_dates
 
 
 @contextlib.contextmanager

@@ -5,8 +5,8 @@ import random
 import time
 from typing import Callable
 
-from stock_db import prune_to_last_n_days, upsert_bars
-from tw_market_data import fetch_daily_bars, iter_calendar_days_back
+from stock_db import prune_to_last_n_days, upsert_bars, upsert_institution_trades
+from tw_market_data import fetch_daily_bars, fetch_twse_institution_trades, iter_calendar_days_back
 
 
 def sync_last_n_trading_days(
@@ -33,6 +33,7 @@ def sync_last_n_trading_days(
     with conn:
         conn.execute("DELETE FROM bars WHERE strftime('%w', date) IN ('0','6')")
         conn.execute("DELETE FROM day_meta WHERE strftime('%w', date) IN ('0','6')")
+        conn.execute("DELETE FROM inst_trades WHERE strftime('%w', date) IN ('0','6')")
 
     def day_counts(d: dt.date) -> tuple[int, int] | None:
         row = conn.execute(
@@ -43,6 +44,13 @@ def sync_last_n_trading_days(
             return None
         return int(row["twse_count"]), int(row["tpex_count"])
 
+    def has_inst_trades(d: dt.date) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM inst_trades WHERE date=? AND market='TWSE' LIMIT 1",
+            (d.isoformat(),),
+        ).fetchone()
+        return row is not None
+
     # 1) 往回掃描直到湊滿 keep_trading_days 個交易日
     collected: list[dt.date] = []
     for day in iter_calendar_days_back(end_date):
@@ -50,18 +58,19 @@ def sync_last_n_trading_days(
             break
         counts = day_counts(day)
 
-        # 已完整存在（兩市場都非 0）就直接記一個交易日
-        if counts is not None and counts[0] > 0 and counts[1] > 0:
+        # 已完整存在（行情兩市場都非 0，且法人資料存在）就直接記一個交易日
+        if counts is not None and counts[0] > 0 and counts[1] > 0 and has_inst_trades(day):
             collected.append(day)
             continue
 
         # 否則抓一次該日資料，補齊缺漏
         log(f"抓取：{day.isoformat()}（{len(collected) + 1}/{keep_trading_days} 交易日）")
+        request_delay = 0.4
         twse, tpex = fetch_daily_bars(
             day,
             cache_dir=cache_dir,
             use_cache=use_cache,
-            per_request_delay=0.4,
+            per_request_delay=request_delay,
         )
 
         if not twse and not tpex:
@@ -73,8 +82,14 @@ def sync_last_n_trading_days(
         if tpex:
             upsert_bars(conn, day, tpex, fetched_at=now_utc)
 
+        # 上市三大法人（T86）只需要 TWSE；若該日非交易日通常會回空
+        time.sleep(request_delay + random.random() * 0.2)
+        inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+        if inst_trades:
+            upsert_institution_trades(conn, day, inst_trades)
+
         collected.append(day)
-        log(f"寫入：TWSE={len(twse)}、TPEX={len(tpex)}")
+        log(f"寫入：TWSE={len(twse)}、TPEX={len(tpex)}、T86={len(inst_trades)}")
         time.sleep(per_day_delay + random.random() * 0.5)
 
     # 只保留最後 keep_trading_days 個（asc）
