@@ -26,18 +26,27 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
+如果你已經有 conda 環境（例如本機的 `stock`）：
+
+```bash
+/Users/wangshaocheng/anaconda3/envs/stock/bin/python -m pip install -r requirements.txt
+PORT=5001 /Users/wangshaocheng/anaconda3/envs/stock/bin/python app.py
+```
+
 這個資料夾提供：
 
-- Web UI（Flask）：漲幅排行、K 線、接近 MA
+- Web UI（Flask）：漲幅排行、K 線、接近 MA、法人買超、市值排名、策略
 - CLI 腳本：簡單篩選（保留）
 
 資料來源：
 - TWSE（上市）：每日收盤行情(全部)
 - TPEx（上櫃）：上櫃股票行情
+- TWSE OpenAPI：公司基本資料（用於取得已發行股數，計算市值快照）
 
 ## 使用方式
 
 - 啟動後開啟任一頁面，再按導覽列的「更新DB」按鈕開始抓資料/補齊缺漏。
+- 市值排名是「低頻更新」的獨立快照：需要另外按導覽列的「更新市值」按鈕。
 
 ## Web（Flask）
 
@@ -58,6 +67,8 @@ PORT=5001 python app.py
 - http://127.0.0.1:5000/kline
 - http://127.0.0.1:5000/near-ma
 - http://127.0.0.1:5000/inst
+- http://127.0.0.1:5000/market-cap
+- http://127.0.0.1:5000/strategy
 
 ## Screenshots
 
@@ -81,9 +92,28 @@ PORT=5001 python app.py
 
 ![上市法人買超排行](img/Three_Major.png)
 
+### 市值排名（上市）
+
+![市值](/img/market-cap.png)
+
+### 策略（AND 交集）
+
+![策略](/img/strategy.png)
+
 資料會存到 `data/stock.db`（SQLite）。啟動後請按導覽列的「更新DB」按鈕，才會進行：
 - 自動偵測從今天往回補齊缺漏（抓取間有延遲避免被封）
 - 自動刪掉舊資料（保留最近 61 個交易日；這樣才能算到 60 日漲幅：今日 vs 60 個交易日前）
+
+市值排名（/market-cap）使用獨立資料表（快照），不會跟著每天同步自動更新：
+- 請按導覽列「更新市值」建立/刷新快照
+- 市值計算方式：已發行股數 × 最新交易日收盤價（以 DB 最新交易日為準）
+
+策略頁（/strategy）支援三個條件做 AND 交集：
+- 漲幅：N 天漲幅 Top K
+- 法人買超：M 天買超 Top K（外資 / 投信 / 自營商 / 外資+投信）
+- 市值：市值 Top L
+
+任一欄位留空代表不採用該條件；若你選了市值條件但尚未建立市值快照，頁面會提示先按「更新市值」。
 
 小提醒：不要同時跑兩個不同 port 的 Flask（例如 5000/5001），不然你可能會看到不同版本的頁面結果。
 

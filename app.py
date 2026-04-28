@@ -12,13 +12,18 @@ from stock_db import (
     db_session,
     get_bars_for_code,
     get_code_name,
+    get_market_cap_meta,
     latest_trading_date,
+    latest_market_cap_date,
     list_trading_dates,
     select_closes_for_dates,
     select_closes_for_last_n_trading_days,
     select_institution_net_buy_rank,
+    select_market_cap_top,
+    upsert_market_caps,
 )
 from sync_data import sync_last_n_trading_days
+from tw_market_data import fetch_twse_company_share_info
 
 
 BASE_DIR = os.path.dirname(__file__)
@@ -135,6 +140,81 @@ def create_app() -> Flask:
             "logs": list(sync_state.get("logs") or []),
         }
         return jsonify(payload)
+
+    @app.post("/market-cap/update")
+    def update_market_cap():
+        """更新市值快照（獨立資料表；更新頻率較低）。"""
+
+        asof = get_db_latest_date()
+        if not asof:
+            return redirect(url_for("market_cap", error="no_db"))
+
+        with db_session(db_path) as conn:
+            closes = select_closes_for_dates(conn, [asof])
+
+            close_by_code: dict[str, float] = {}
+            name_by_code: dict[str, str] = {}
+            for r in closes:
+                code = str(r["code"])
+                close_by_code[code] = float(r["close"])
+                name_by_code[code] = str(r["name"])
+
+            company_info_date, share_rows = fetch_twse_company_share_info(cache_dir=cache_dir, use_cache=True)
+            shares_by_code = {r.code: r.issued_shares for r in share_rows}
+            share_name_by_code = {r.code: r.name for r in share_rows}
+
+            rows: list[tuple[str, str, int, float, int]] = []
+            for code, close in close_by_code.items():
+                shares = shares_by_code.get(code)
+                if not shares:
+                    continue
+                name = name_by_code.get(code) or share_name_by_code.get(code) or ""
+                if not name:
+                    continue
+                mcap = int(round(float(close) * int(shares)))
+                rows.append((code, name, int(shares), float(close), int(mcap)))
+
+            now_utc = dt.datetime.now(dt.timezone.utc)
+            upsert_market_caps(
+                conn,
+                asof_date=asof,
+                company_info_date=company_info_date,
+                rows=rows,
+                fetched_at=now_utc,
+            )
+
+        return redirect(url_for("market_cap", updated="1"))
+
+    @app.get("/market-cap")
+    def market_cap():
+        asof = get_db_latest_date()
+        latest_cap = None
+        error = request.args.get("error")
+        updated = request.args.get("updated")
+        limit = int(request.args.get("limit", "200"))
+        if limit <= 0:
+            limit = 200
+
+        cap_rows = []
+        meta = None
+        if asof:
+            with db_session(db_path) as conn:
+                latest_cap = latest_market_cap_date(conn)
+                use_asof = latest_cap or asof
+                meta = get_market_cap_meta(conn, use_asof) if latest_cap else None
+                if latest_cap:
+                    cap_rows = select_market_cap_top(conn, asof_date=latest_cap, limit=limit)
+
+        return render_template(
+            "market_cap.html",
+            asof=asof,
+            latest_cap=latest_cap,
+            meta=meta,
+            rows=cap_rows,
+            limit=limit,
+            updated=updated,
+            error=error,
+        )
 
     @app.get("/gainers")
     def gainers():
@@ -439,6 +519,163 @@ def create_app() -> Flask:
             inst_options=inst_options,
             used_dates=used_dates,
             rows=rows,
+        )
+
+    @app.get("/strategy")
+    def strategy():
+        """三條件 AND 篩選；空白代表不採用該條件。"""
+
+        asof = get_db_latest_date()
+
+        def to_int(value: str | None) -> int | None:
+            if value is None:
+                return None
+            s = str(value).strip()
+            if not s:
+                return None
+            try:
+                v = int(s)
+            except ValueError:
+                return None
+            return v if v > 0 else None
+
+        n_days = to_int(request.args.get("n_days"))
+        n_topk = to_int(request.args.get("n_topk"))
+        m_days = to_int(request.args.get("m_days"))
+        m_topk = to_int(request.args.get("m_topk"))
+        inst = (request.args.get("inst") or "").strip().lower() or None
+        cap_topl = to_int(request.args.get("cap_topl"))
+
+        inst_options = [
+            ("foreign", "外資"),
+            ("trust", "投信"),
+            ("dealer", "自營商"),
+            ("foreign_trust", "外資+投信"),
+        ]
+        inst_allowed = {k for k, _ in inst_options}
+        if inst is not None and inst not in inst_allowed:
+            inst = None
+
+        results: list[dict[str, object]] = []
+        used = {
+            "returns": bool(n_days and n_topk and asof),
+            "inst": bool(m_days and m_topk and inst and asof),
+            "cap": bool(cap_topl),
+        }
+
+        if not any(used.values()):
+            return render_template(
+                "strategy.html",
+                asof=asof,
+                n_days=n_days,
+                n_topk=n_topk,
+                m_days=m_days,
+                m_topk=m_topk,
+                inst=inst,
+                cap_topl=cap_topl,
+                inst_options=inst_options,
+                used=used,
+                rows=[],
+                note="請至少選一個條件（漲幅 / 法人買超 / 市值）。",
+            )
+
+        with db_session(db_path) as conn:
+            code_set: set[str] | None = None
+            metrics: dict[str, dict[str, object]] = {}
+            hard_fail = False
+
+            # 1) 漲幅 TopK（N 交易日）
+            if used["returns"] and n_days and n_topk and asof:
+                trading_dates = list_trading_dates(conn, desc=False)
+                if not trading_dates or len(trading_dates) < (n_days + 1):
+                    hard_fail = True
+                else:
+                    latest = trading_dates[-1]
+                    past = trading_dates[-1 - n_days]
+                    rows2 = select_closes_for_dates(conn, [latest, past])
+
+                    close_by_code_date: dict[str, dict[str, float]] = {}
+                    name_by_code: dict[str, str] = {}
+                    for r in rows2:
+                        code = str(r["code"])
+                        name_by_code[code] = str(r["name"])
+                        close_by_code_date.setdefault(code, {})[str(r["date"])] = float(r["close"])
+
+                    latest_s = latest.isoformat()
+                    past_s = past.isoformat()
+                    rank = []
+                    for code, closes in close_by_code_date.items():
+                        if latest_s not in closes or past_s not in closes:
+                            continue
+                        past_close = float(closes[past_s])
+                        if past_close == 0:
+                            continue
+                        latest_close = float(closes[latest_s])
+                        ret = (latest_close / past_close - 1.0) * 100.0
+                        rank.append((ret, code, name_by_code.get(code, "")))
+                    rank.sort(key=lambda x: (-float(x[0]), x[1]))
+                    rank = rank[:n_topk]
+
+                    codes = {c for _, c, _ in rank}
+                    code_set = codes if code_set is None else (code_set & codes)
+                    for ret, code, name in rank:
+                        metrics.setdefault(code, {})["name"] = name
+                        metrics.setdefault(code, {})["ret_pct"] = float(ret)
+
+            # 2) 法人買超 TopK（M 交易日）
+            if used["inst"] and m_days and m_topk and inst:
+                raw, _used_dates = select_institution_net_buy_rank(conn, days=m_days, inst=inst, limit=m_topk)
+                codes = {str(r["code"]) for r in raw}
+                code_set = codes if code_set is None else (code_set & codes)
+                for r in raw:
+                    code = str(r["code"])
+                    metrics.setdefault(code, {})["name"] = str(r["name"])
+                    metrics.setdefault(code, {})["inst_net"] = int(r["net"])
+
+            # 3) 市值 TopL
+            if used["cap"] and cap_topl:
+                cap_date = latest_market_cap_date(conn)
+                if not cap_date:
+                    hard_fail = True
+                else:
+                    cap_raw = select_market_cap_top(conn, asof_date=cap_date, limit=cap_topl)
+                    codes = {str(r["code"]) for r in cap_raw}
+                    code_set = codes if code_set is None else (code_set & codes)
+                    for r in cap_raw:
+                        code = str(r["code"])
+                        metrics.setdefault(code, {})["name"] = str(r["name"])
+                        metrics.setdefault(code, {})["mcap"] = int(r["market_cap"])
+
+            if hard_fail:
+                results = []
+            elif not code_set:
+                results = []
+            else:
+                for code in sorted(code_set):
+                    item = {"code": code}
+                    item.update(metrics.get(code, {}))
+                    results.append(item)
+
+        note = None
+        if used["cap"] and cap_topl and not results:
+            note = "你有設定市值條件，但尚未有市值快照；請先按上方『更新市值』。"
+        if used["returns"] and n_days and n_topk and not results and asof is not None:
+            # 可能是交易日資料不足
+            note = note or "你有設定漲幅條件，但 DB 交易日資料不足；請先按上方『更新DB』補齊。"
+
+        return render_template(
+            "strategy.html",
+            asof=asof,
+            n_days=n_days,
+            n_topk=n_topk,
+            m_days=m_days,
+            m_topk=m_topk,
+            inst=inst,
+            cap_topl=cap_topl,
+            inst_options=inst_options,
+            used=used,
+            rows=results,
+            note=note,
         )
 
     return app

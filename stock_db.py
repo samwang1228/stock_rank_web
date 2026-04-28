@@ -48,6 +48,24 @@ CREATE TABLE IF NOT EXISTS inst_trades (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inst_trades_code_date ON inst_trades(code, date);
+
+CREATE TABLE IF NOT EXISTS market_cap_meta (
+    asof_date TEXT PRIMARY KEY,
+    company_info_date TEXT,
+    fetched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_caps (
+    asof_date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    issued_shares INTEGER NOT NULL,
+    close REAL NOT NULL,
+    market_cap INTEGER NOT NULL,
+    PRIMARY KEY (asof_date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_caps_asof_cap ON market_caps(asof_date, market_cap DESC);
 """
 
 
@@ -190,6 +208,8 @@ def prune_to_last_n_days(conn: sqlite3.Connection, keep_trading_days: int) -> No
             (int(keep_trading_days),),
         )
 
+        # 市值快照不跟著交易日 prune（更新頻率較低；保留歷史快照）
+
 
 @dataclass(frozen=True)
 class BarRow:
@@ -276,6 +296,7 @@ def select_institution_net_buy_rank(
         "trust": "trust_net",
         "dealer": "dealer_net",
         "total": "total_net",
+        "foreign_trust": "foreign_net + trust_net",
     }
     col = col_map.get(inst)
     if not col:
@@ -312,6 +333,58 @@ def select_institution_net_buy_rank(
     ).fetchall()
 
     return rows, used_dates
+
+
+def upsert_market_caps(
+    conn: sqlite3.Connection,
+    *,
+    asof_date: dt.date,
+    company_info_date: str | None,
+    rows: list[tuple[str, str, int, float, int]],
+    fetched_at: dt.datetime,
+) -> None:
+    """寫入一個 asof_date 的市值快照。
+
+    rows: (code, name, issued_shares, close, market_cap)
+    """
+
+    asof_s = _date_to_str(asof_date)
+    with conn:
+        conn.execute("DELETE FROM market_caps WHERE asof_date=?", (asof_s,))
+        conn.execute(
+            "INSERT INTO market_cap_meta(asof_date, company_info_date, fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(asof_date) DO UPDATE SET company_info_date=excluded.company_info_date, fetched_at=excluded.fetched_at",
+            (asof_s, company_info_date, fetched_at.isoformat(timespec="seconds")),
+        )
+        if not rows:
+            return
+        conn.executemany(
+            "INSERT INTO market_caps(asof_date, code, name, issued_shares, close, market_cap) VALUES(?,?,?,?,?,?)",
+            [(asof_s, code, name, int(shares), float(close), int(mcap)) for (code, name, shares, close, mcap) in rows],
+        )
+
+
+def latest_market_cap_date(conn: sqlite3.Connection) -> dt.date | None:
+    row = conn.execute("SELECT asof_date FROM market_cap_meta ORDER BY asof_date DESC LIMIT 1").fetchone()
+    return _str_to_date(row["asof_date"]) if row else None
+
+
+def get_market_cap_meta(conn: sqlite3.Connection, asof_date: dt.date) -> sqlite3.Row | None:
+    row = conn.execute("SELECT * FROM market_cap_meta WHERE asof_date=?", (_date_to_str(asof_date),)).fetchone()
+    return row
+
+
+def select_market_cap_top(
+    conn: sqlite3.Connection,
+    *,
+    asof_date: dt.date,
+    limit: int = 200,
+) -> list[sqlite3.Row]:
+    cur = conn.execute(
+        "SELECT code, name, issued_shares, close, market_cap FROM market_caps WHERE asof_date=? ORDER BY market_cap DESC, code ASC LIMIT ?",
+        (_date_to_str(asof_date), int(limit)),
+    )
+    return cur.fetchall()
 
 
 @contextlib.contextmanager

@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>市值排名（上市）</h2>
+
+  {% if error == 'no_db' %}
+    <p class="muted">尚未有行情資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  {% if updated %}
+    <p class="muted">已更新市值快照。</p>
+  {% endif %}
+
+  {% if latest_cap %}
+    <p class="muted">
+      市值快照日期：{{ latest_cap.strftime('%Y-%m-%d') }}
+      {% if meta and meta.company_info_date %}｜公司資料出表日：{{ meta.company_info_date }}{% endif %}
+      {% if meta and meta.fetched_at %}｜更新時間：{{ meta.fetched_at }}{% endif %}
+      ｜顯示 Top {{ limit }}
+    </p>
+  {% else %}
+    <p class="muted">尚未建立市值快照；請按上方「更新市值」。</p>
+  {% endif %}
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>代號</th>
+          <th>名稱</th>
+          <th class="num">收盤</th>
+          <th class="num">發行股數</th>
+          <th class="num">市值（元）</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td class="num">{{ loop.index }}</td>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name }}</td>
+            <td class="num">{{ '%.2f'|format(r.close) }}</td>
+            <td class="num">{{ '{:,}'.format(r.issued_shares) }}</td>
+            <td class="num">{{ '{:,}'.format(r.market_cap) }}</td>
+          </tr>
+        {% endfor %}
+        {% if not rows %}
+          <tr>
+            <td colspan="6" class="muted">（沒有資料）</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

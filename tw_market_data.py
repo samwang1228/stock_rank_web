@@ -91,6 +91,39 @@ def _ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
+def _fetch_json_any(url: str, *, timeout: int = 30, retries: int = 3, user_agent: str = DEFAULT_USER_AGENT) -> object:
+    """Like _fetch_json, but allows non-dict JSON payloads (e.g. list from OpenAPI)."""
+
+    last_err: Exception | None = None
+    context = _ssl_context()
+    insecure_allowed = os.environ.get("STOCK_SCREENER_INSECURE") == "1"
+
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+                raw = resp.read()
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except ssl.SSLCertVerificationError as e:
+            last_err = e
+            if insecure_allowed:
+                context = ssl._create_unverified_context()  # noqa: S501
+                continue
+            break
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as e:
+            last_err = e
+            if attempt == retries - 1:
+                break
+            time.sleep(1.2 * (2**attempt))
+
+    if isinstance(last_err, ssl.SSLCertVerificationError):
+        raise RuntimeError(
+            "HTTPS 憑證驗證失敗。建議使用 conda/venv 的 Python 執行；"
+            "或在你了解風險下暫時設定 STOCK_SCREENER_INSECURE=1"
+        )
+    raise RuntimeError(f"抓取失敗: {url} ({last_err})")
+
+
 def _fetch_json(url: str, *, timeout: int = 30, retries: int = 3, user_agent: str = DEFAULT_USER_AGENT) -> dict:
     last_err: Exception | None = None
     context = _ssl_context()
@@ -137,6 +170,21 @@ def _load_or_fetch_json(cache_dir: str, cache_key: str, url: str, *, use_cache: 
     return payload
 
 
+def _load_or_fetch_json_any(cache_dir: str, cache_key: str, url: str, *, use_cache: bool) -> object:
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, f"{cache_key}.json")
+    if use_cache and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    payload = _fetch_json_any(url)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    return payload
+
+
 def _twse_daily_url(d: dt.date) -> str:
     return f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={d:%Y%m%d}&type=ALL"
 
@@ -148,6 +196,54 @@ def _tpex_daily_url(d: dt.date) -> str:
 
 def _tpex_openapi_daily_url() -> str:
     return "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+
+
+def _twse_openapi_company_basic_url() -> str:
+    return "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+
+
+@dataclass(frozen=True)
+class CompanyShareInfo:
+    code: str
+    name: str
+    issued_shares: int
+
+
+def fetch_twse_company_share_info(
+    *,
+    cache_dir: str,
+    use_cache: bool = True,
+) -> tuple[str | None, list[CompanyShareInfo]]:
+    """抓取上市公司基本資料（含已發行普通股數）。
+
+    回傳 (出表日期, rows)。出表日期為 ROC compact (例如 1150427)。
+    """
+
+    payload = _load_or_fetch_json_any(cache_dir, "twse_company_basic", _twse_openapi_company_basic_url(), use_cache=use_cache)
+    if not isinstance(payload, list) or not payload:
+        return None, []
+
+    asof_roc = str(payload[0].get("出表日期") or "").strip() or None
+    out: list[CompanyShareInfo] = []
+    for row in payload:
+        try:
+            code = str(row.get("公司代號") or "").strip()
+            if not CODE_RE.match(code):
+                continue
+            name = str(row.get("公司簡稱") or row.get("公司名稱") or "").strip()
+            if not name:
+                continue
+            if _is_derivative_like(name):
+                continue
+            issued_raw = row.get("已發行普通股數或TDR原股發行股數")
+            issued = _parse_int(issued_raw)
+            if issued is None or issued <= 0:
+                continue
+            out.append(CompanyShareInfo(code=code, name=name, issued_shares=int(issued)))
+        except Exception:
+            continue
+
+    return asof_roc, out
 
 
 def _twse_t86_url(d: dt.date) -> str:

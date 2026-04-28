@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>策略</h2>
+
+  {% if asof %}
+    <p class="muted">資料截至：{{ asof.strftime('%Y-%m-%d') }}（條件為 AND；空白代表不採用）</p>
+  {% else %}
+    <p class="muted">DB 目前沒有資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  {% if note %}
+    <p class="muted">{{ note }}</p>
+  {% endif %}
+
+  <form class="card" method="get" action="{{ url_for('strategy') }}">
+    <div class="row">
+      <strong>漲幅</strong>
+      <label>N天：<input type="number" name="n_days" value="{{ n_days or '' }}" placeholder="例如 5" /></label>
+      <label>Top K（前 K 名）：<input type="number" name="n_topk" value="{{ n_topk or '' }}" placeholder="例如 50" /></label>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <strong>法人買超</strong>
+      <label>M天：<input type="number" name="m_days" value="{{ m_days or '' }}" placeholder="例如 5" /></label>
+      <label>Top K（前 K 名）：<input type="number" name="m_topk" value="{{ m_topk or '' }}" placeholder="例如 50" /></label>
+      <label>
+        類型：
+        <select name="inst" style="border:1px solid #ddd; border-radius:8px; padding:8px 10px; font-size:14px;">
+          <option value="" {% if not inst %}selected{% endif %}>(不採用)</option>
+          {% for k, label in inst_options %}
+            <option value="{{ k }}" {% if inst == k %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <strong>市值</strong>
+      <label>前L：<input type="number" name="cap_topl" value="{{ cap_topl or '' }}" placeholder="例如 200" /></label>
+      <span class="muted">（需要先按上方「更新市值」建立快照）</span>
+    </div>
+
+    <div class="row" style="margin-top: 12px;">
+      <button type="submit">套用</button>
+      <a class="muted" href="{{ url_for('strategy') }}" style="text-decoration:none;">清空</a>
+    </div>
+  </form>
+
+  {% if note and rows|length == 0 %}
+    <div class="spacer"></div>
+  {% endif %}
+
+  <div class="spacer"></div>
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>代號</th>
+          <th>名稱</th>
+          {% if used.returns %}<th class="num">漲幅(%)</th>{% endif %}
+          {% if used.inst %}<th class="num">買超股數</th>{% endif %}
+          {% if used.cap %}<th class="num">市值(元)</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name or '' }}</td>
+            {% if used.returns %}<td class="num">{% if r.ret_pct is not none %}{{ '%.2f'|format(r.ret_pct) }}{% else %}-{% endif %}</td>{% endif %}
+            {% if used.inst %}<td class="num">{% if r.inst_net is not none %}{{ '{:,}'.format(r.inst_net) }}{% else %}-{% endif %}</td>{% endif %}
+            {% if used.cap %}<td class="num">{% if r.mcap is not none %}{{ '{:,}'.format(r.mcap) }}{% else %}-{% endif %}</td>{% endif %}
+          </tr>
+        {% endfor %}
+        {% if rows|length == 0 %}
+          {% set cols = 2 + (1 if used.returns else 0) + (1 if used.inst else 0) + (1 if used.cap else 0) %}
+          <tr>
+            <td colspan="{{ cols }}" class="muted">（沒有結果）</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if note %}
+    <p class="muted" style="margin-top: 10px;">{{ note }}</p>
+  {% endif %}
+{% endblock %}
