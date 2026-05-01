@@ -118,6 +118,73 @@ def create_app() -> Flask:
 
         threading.Thread(target=runner, daemon=True).start()
 
+    def _volume_up_rank(conn, *, days: int, limit: int) -> tuple[list[dict[str, object]], list[dt.date], list[dt.date]]:
+        windows = [1, 3, 5, 10, 15]
+        if days not in windows:
+            days = 5
+        if limit <= 0:
+            limit = 200
+
+        used_desc = list_trading_dates(conn, limit=2 * days, desc=True)
+        used_dates = list(reversed(used_desc))
+        if len(used_dates) != 2 * days:
+            return ([], [], [])
+
+        older_dates = used_dates[:days]
+        recent_dates = used_dates[days:]
+
+        raw = select_close_volume_for_dates(conn, used_dates)
+
+        older_set = {d.isoformat() for d in older_dates}
+        recent_set = {d.isoformat() for d in recent_dates}
+
+        agg: dict[str, dict[str, object]] = {}
+        for r in raw:
+            code = str(r["code"])
+            d = agg.setdefault(
+                code,
+                {
+                    "code": code,
+                    "name": str(r["name"]),
+                    "older": 0,
+                    "recent": 0,
+                    "older_n": 0,
+                    "recent_n": 0,
+                },
+            )
+            date_s = str(r["date"])
+            vol = int(r["volume"])
+            if date_s in older_set:
+                d["older"] = int(d["older"]) + vol
+                d["older_n"] = int(d["older_n"]) + 1
+            elif date_s in recent_set:
+                d["recent"] = int(d["recent"]) + vol
+                d["recent_n"] = int(d["recent_n"]) + 1
+
+        rows: list[dict[str, object]] = []
+        for _, d in agg.items():
+            if int(d["older_n"]) != days or int(d["recent_n"]) != days:
+                continue
+            older = int(d["older"])
+            recent = int(d["recent"])
+            if older <= 0:
+                continue
+            ratio = float(recent) / float(older)
+            pct = (ratio - 1.0) * 100.0
+            rows.append(
+                {
+                    "code": str(d["code"]),
+                    "name": str(d["name"]),
+                    "older": older,
+                    "recent": recent,
+                    "ratio": ratio,
+                    "pct": pct,
+                }
+            )
+
+        rows.sort(key=lambda x: (-float(x["ratio"]), str(x["code"])))
+        return (rows[:limit], older_dates, recent_dates)
+
     @app.get("/")
     def index():
         return redirect(url_for("gainers"))
@@ -597,6 +664,46 @@ def create_app() -> Flask:
             limit=limit,
         )
 
+    @app.get("/vol-up")
+    def vol_up():
+        asof = get_db_latest_date()
+        days = int(request.args.get("days", "5"))
+        windows = [1, 3, 5, 10, 15]
+        if days not in windows:
+            days = 5
+
+        limit = int(request.args.get("limit", "200"))
+        if limit <= 0:
+            limit = 200
+
+        if not asof:
+            return render_template(
+                "vol_up.html",
+                title="量能提升排行",
+                asof=None,
+                days=days,
+                windows=windows,
+                older_dates=[],
+                recent_dates=[],
+                rows=[],
+                limit=limit,
+            )
+
+        with db_session(db_path) as conn:
+            rows, older_dates, recent_dates = _volume_up_rank(conn, days=days, limit=limit)
+
+        return render_template(
+            "vol_up.html",
+            title="量能提升排行",
+            asof=asof,
+            days=days,
+            windows=windows,
+            older_dates=older_dates,
+            recent_dates=recent_dates,
+            rows=rows,
+            limit=limit,
+        )
+
     @app.get("/inst")
     def inst_rank():
         """上市三大法人買超排行（依日資料彙總）。"""
@@ -666,6 +773,12 @@ def create_app() -> Flask:
         m_topk = to_int(request.args.get("m_topk"))
         inst = (request.args.get("inst") or "").strip().lower() or None
         cap_topl = to_int(request.args.get("cap_topl"))
+        v_days = to_int(request.args.get("v_days"))
+        v_topk = to_int(request.args.get("v_topk"))
+
+        vol_windows = [1, 3, 5, 10, 15]
+        if v_days is not None and v_days not in vol_windows:
+            v_days = None
 
         inst_options = [
             ("foreign", "外資"),
@@ -680,6 +793,7 @@ def create_app() -> Flask:
         results: list[dict[str, object]] = []
         used = {
             "returns": bool(n_days and n_topk and asof),
+            "vol": bool(v_days and v_topk and asof),
             "inst": bool(m_days and m_topk and inst and asof),
             "cap": bool(cap_topl),
         }
@@ -694,10 +808,13 @@ def create_app() -> Flask:
                 m_topk=m_topk,
                 inst=inst,
                 cap_topl=cap_topl,
+                v_days=v_days,
+                v_topk=v_topk,
+                vol_windows=vol_windows,
                 inst_options=inst_options,
                 used=used,
                 rows=[],
-                note="請至少選一個條件（漲幅 / 法人買超 / 市值）。",
+                note="請至少選一個條件（漲幅 / 量能提升 / 法人買超 / 市值）。",
             )
 
         with db_session(db_path) as conn:
@@ -743,7 +860,18 @@ def create_app() -> Flask:
                         metrics.setdefault(code, {})["name"] = name
                         metrics.setdefault(code, {})["ret_pct"] = float(ret)
 
-            # 2) 法人買超 TopK（M 交易日）
+            # 2) 成交量提升 TopK（V 天；近 2V 交易日）
+            if used["vol"] and v_days and v_topk and asof:
+                vol_rows, _older_dates, _recent_dates = _volume_up_rank(conn, days=v_days, limit=v_topk)
+                codes = {str(r["code"]) for r in vol_rows}
+                code_set = codes if code_set is None else (code_set & codes)
+                for r in vol_rows:
+                    code = str(r["code"])
+                    metrics.setdefault(code, {})["name"] = str(r.get("name") or "")
+                    metrics.setdefault(code, {})["vol_ratio"] = float(r["ratio"])
+                    metrics.setdefault(code, {})["vol_pct"] = float(r["pct"])
+
+            # 3) 法人買超 TopK（M 交易日）
             if used["inst"] and m_days and m_topk and inst:
                 raw, _used_dates = select_institution_net_buy_rank(conn, days=m_days, inst=inst, limit=m_topk)
                 codes = {str(r["code"]) for r in raw}
@@ -753,7 +881,7 @@ def create_app() -> Flask:
                     metrics.setdefault(code, {})["name"] = str(r["name"])
                     metrics.setdefault(code, {})["inst_net"] = int(r["net"])
 
-            # 3) 市值 TopL
+            # 4) 市值 TopL
             if used["cap"] and cap_topl:
                 cap_date = latest_market_cap_date(conn)
                 if not cap_date:
@@ -783,6 +911,8 @@ def create_app() -> Flask:
         if used["returns"] and n_days and n_topk and not results and asof is not None:
             # 可能是交易日資料不足
             note = note or "你有設定漲幅條件，但 DB 交易日資料不足；請先按上方『更新DB』補齊。"
+        if used["vol"] and v_days and v_topk and not results and asof is not None:
+            note = note or "你有設定量能提升條件，但近 2V 個交易日成交量資料可能不足；請先按上方『更新DB』補齊。"
 
         return render_template(
             "strategy.html",
@@ -793,6 +923,9 @@ def create_app() -> Flask:
             m_topk=m_topk,
             inst=inst,
             cap_topl=cap_topl,
+            v_days=v_days,
+            v_topk=v_topk,
+            vol_windows=vol_windows,
             inst_options=inst_options,
             used=used,
             rows=results,
