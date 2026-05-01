@@ -346,6 +346,18 @@ def select_closes_for_dates(conn: sqlite3.Connection, dates: list[dt.date]) -> l
     return cur.fetchall()
 
 
+def select_close_volume_for_dates(conn: sqlite3.Connection, dates: list[dt.date]) -> list[sqlite3.Row]:
+    if not dates:
+        return []
+    ds = [_date_to_str(d) for d in dates]
+    placeholders = ",".join(["?"] * len(ds))
+    cur = conn.execute(
+        f"SELECT code, name, date, close, volume FROM bars WHERE date IN ({placeholders}) ORDER BY code ASC, date ASC",
+        ds,
+    )
+    return cur.fetchall()
+
+
 def select_closes_for_last_n_trading_days(conn: sqlite3.Connection, n: int) -> list[sqlite3.Row]:
     cur_dates = conn.execute("SELECT date FROM day_meta ORDER BY date DESC LIMIT ?", (int(n),)).fetchall()
     dates = [_str_to_date(r["date"]) for r in cur_dates]

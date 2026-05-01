@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>近 N 交易日成交值排行</h2>
+  {% if asof %}
+    <p class="muted">資料截至：{{ asof.strftime('%Y-%m-%d') }}；計算天數：{{ days }}（公式： (近 N 日收盤價加總 × 近 N 日成交量加總) / N）</p>
+  {% else %}
+    <p class="muted">DB 目前沒有資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  <div class="card row">
+    <span class="muted">天數：</span>
+    {% for w in windows %}
+      <a href="{{ url_for('turnover', days=w, limit=limit) }}">{{ w }}天</a>
+      {% if days == w %}<span class="muted">(目前)</span>{% endif %}
+    {% endfor %}
+  </div>
+
+  {% if used_dates and asof %}
+    <p class="muted">使用日期：{{ used_dates[0].strftime('%Y-%m-%d') }} ～ {{ used_dates[-1].strftime('%Y-%m-%d') }}</p>
+  {% endif %}
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>代號</th>
+          <th>名稱</th>
+          <th class="num">成交值</th>
+          <th class="num">收盤加總</th>
+          <th class="num">成交量加總</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td class="num">{{ loop.index }}</td>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name }}</td>
+            <td class="num">{{ '{:,.0f}'.format(r.score) }}</td>
+            <td class="num">{{ '{:,.2f}'.format(r.sum_close) }}</td>
+            <td class="num">{{ '{:,d}'.format(r.sum_volume) }}</td>
+          </tr>
+        {% endfor %}
+        {% if not rows %}
+          <tr>
+            <td colspan="6" class="muted">無資料（可能 DB 尚未更新，或部分股票近 {{ days }} 個交易日資料不完整）。</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

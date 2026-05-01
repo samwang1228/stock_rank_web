@@ -1,4 +1,4 @@
-# stock_ui
+# Stock Dog (股狗)
 
 Repo：
 - https://github.com/samwang1228/stock_rank_web.git
@@ -33,15 +33,23 @@ python app.py
 PORT=5001 /Users/wangshaocheng/anaconda3/envs/stock/bin/python app.py
 ```
 
-這個資料夾提供：
+## 功能說明：
 
-- Web UI（Flask）：漲幅排行、K 線、接近 MA、法人買超、市值排名、策略
+- Web UI（Flask）：
+1. 漲幅排行：提供不同天數台股漲幅排名股票
+2. 成值排行：為方便計算本系統採用 `收盤價 x 成交量` 
+3. K 線：畫近60天交易日的個股K線
+4. 接近 MA：列出目前股價接近不同天數均線的股票
+5. 法人買超：提供不同天數台股法人買超排名
+6. 市值排名：提供台股市值排行
+7. 策略：可以根據上述策略找出符合共通條件的股票
 - CLI 腳本：簡單篩選（保留）
 
-資料來源：
+## 資料來源：
 - TWSE（上市）：每日收盤行情(全部)
 - TPEx（上櫃）：上櫃股票行情
 - TWSE OpenAPI：公司基本資料（用於取得已發行股數，計算市值快照）
+- yfiance：上櫃股票會有資料缺失的情況此時用yfiance補足
 
 ## 使用方式
 
@@ -76,6 +84,7 @@ PORT=5001 python app.py
 
 打開：
 - http://127.0.0.1:5000/gainers
+- http://127.0.0.1:5000/turnover
 - http://127.0.0.1:5000/kline
 - http://127.0.0.1:5000/near-ma
 - http://127.0.0.1:5000/inst
@@ -87,6 +96,9 @@ PORT=5001 python app.py
 ### 漲幅排行
 
 ![近 N 交易日漲幅排行](img/Topk.png)
+
+### 成值排行
+![成值排行](img/turnover.png)
 
 ### 接近 MA
 

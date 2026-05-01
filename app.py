@@ -19,6 +19,7 @@ from stock_db import (
     list_trading_dates,
     select_closes_for_dates,
     select_closes_for_last_n_trading_days,
+    select_close_volume_for_dates,
     select_institution_net_buy_rank,
     select_market_cap_top,
     upsert_market_caps,
@@ -510,6 +511,90 @@ def create_app() -> Flask:
             threshold_pct=threshold_pct,
             rows=table,
             sort_key=sort_key,
+        )
+
+    @app.get("/turnover")
+    def turnover():
+        """成交值排行。
+
+        公式（依使用者定義）：
+        score = (近 N 日收盤價加總 × 近 N 日成交量加總) / N
+        """
+
+        asof = get_db_latest_date()
+        days = int(request.args.get("days", "5"))
+        windows = [1, 5, 10, 20, 30]
+        if days not in windows:
+            days = 5
+
+        limit = int(request.args.get("limit", "200"))
+        if limit <= 0:
+            limit = 200
+
+        if not asof:
+            return render_template(
+                "turnover.html",
+                title="成交值排行",
+                asof=None,
+                days=days,
+                windows=windows,
+                used_dates=[],
+                rows=[],
+                limit=limit,
+            )
+
+        with db_session(db_path) as conn:
+            used_desc = list_trading_dates(conn, limit=days, desc=True)
+            used_dates = list(reversed(used_desc))
+            raw = select_close_volume_for_dates(conn, used_dates)
+
+        # 聚合：code -> sum_close, sum_volume, count
+        agg: dict[str, dict[str, object]] = {}
+        for r in raw:
+            code = str(r["code"])
+            d = agg.setdefault(
+                code,
+                {
+                    "code": code,
+                    "name": str(r["name"]),
+                    "sum_close": 0.0,
+                    "sum_volume": 0,
+                    "count": 0,
+                },
+            )
+            d["sum_close"] = float(d["sum_close"]) + float(r["close"])
+            d["sum_volume"] = int(d["sum_volume"]) + int(r["volume"])
+            d["count"] = int(d["count"]) + 1
+
+        rows = []
+        for code, d in agg.items():
+            if int(d["count"]) != days:
+                continue
+            sum_close = float(d["sum_close"])
+            sum_volume = int(d["sum_volume"])
+            score = (sum_close * float(sum_volume)) / float(days)
+            rows.append(
+                {
+                    "code": code,
+                    "name": str(d["name"]),
+                    "score": score,
+                    "sum_close": sum_close,
+                    "sum_volume": sum_volume,
+                }
+            )
+
+        rows.sort(key=lambda x: (-float(x["score"]), str(x["code"])))
+        rows = rows[:limit]
+
+        return render_template(
+            "turnover.html",
+            title="成交值排行",
+            asof=asof,
+            days=days,
+            windows=windows,
+            used_dates=used_dates,
+            rows=rows,
+            limit=limit,
         )
 
     @app.get("/inst")
