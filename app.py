@@ -11,6 +11,7 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 from stock_db import (
     db_session,
     get_bars_for_code,
+    get_last_n_bars_for_code,
     get_code_name,
     get_market_cap_meta,
     latest_trading_date,
@@ -21,6 +22,7 @@ from stock_db import (
     select_institution_net_buy_rank,
     select_market_cap_top,
     upsert_market_caps,
+    upsert_bars_partial,
 )
 from sync_data import sync_last_n_trading_days
 from tw_market_data import fetch_twse_company_share_info
@@ -318,10 +320,44 @@ def create_app() -> Flask:
 
         if code:
             with db_session(db_path) as conn:
-                dates = list_trading_dates(conn, desc=True)[:60]
-                dates.sort()
-                bars = get_bars_for_code(conn, code, dates=dates)
+                bars = get_last_n_bars_for_code(conn, code, 60)
                 name = get_code_name(conn, code)
+
+                # Best-effort OTC (TPEX) backfill: only when we already know this
+                # code is TPEX and DB bars are insufficient.
+                if len(bars) < 60:
+                    row = conn.execute(
+                        "SELECT market FROM bars WHERE code=? ORDER BY date DESC LIMIT 1",
+                        (code,),
+                    ).fetchone()
+                    is_tpex = bool(row and str(row["market"]) == "TPEX")
+                    if is_tpex:
+                        try:
+                            from otc_backfill import backfill_otc_ohlcv
+
+                            end_date = asof or dt.date.today()
+                            # Roughly 1 year window to collect >= 60 trading bars.
+                            start_date = end_date - dt.timedelta(days=365)
+                            name_by_code = {code: name or ""}
+
+                            grouped = backfill_otc_ohlcv(
+                                [code],
+                                start_date=start_date,
+                                end_date=end_date,
+                                name_by_code=name_by_code,
+                                chunk_size=1,
+                                chunk_delay=0.0,
+                            )
+                            extra = [b for day_bars in grouped.values() for b in day_bars]
+                            if extra:
+                                upsert_bars_partial(conn, extra)
+                                bars = get_last_n_bars_for_code(conn, code, 60)
+                                if not name:
+                                    name = get_code_name(conn, code)
+                        except Exception:
+                            # If backfill fails (no internet, rate limit, missing deps),
+                            # we still render whatever data we have.
+                            pass
 
             if bars:
                 import plotly.graph_objects as go

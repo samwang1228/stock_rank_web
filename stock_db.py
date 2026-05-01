@@ -155,6 +155,39 @@ def upsert_bars(conn: sqlite3.Connection, d: dt.date, bars: list[DailyBar], *, f
         )
 
 
+def upsert_bars_partial(conn: sqlite3.Connection, bars: list[DailyBar]) -> int:
+    """Upsert bars without updating `day_meta`.
+
+    This is intended for best-effort backfills (e.g., from yfinance) where we may
+    only have a subset of tickers for a given date. Updating `day_meta` in that
+    case would corrupt trading-day counts.
+    """
+
+    if not bars:
+        return 0
+
+    with conn:
+        rows = [(
+            _date_to_str(b.date),
+            b.code,
+            b.name,
+            b.market,
+            float(b.open),
+            float(b.high),
+            float(b.low),
+            float(b.close),
+            int(b.volume),
+        ) for b in bars]
+
+        conn.executemany(
+            "INSERT INTO bars(date, code, name, market, open, high, low, close, volume) VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(date, code) DO NOTHING",
+            rows,
+        )
+
+    return len(bars)
+
+
 def upsert_institution_trades(
     conn: sqlite3.Connection,
     d: dt.date,
@@ -237,6 +270,31 @@ class BarRow:
     low: float
     close: float
     volume: int
+
+
+def get_last_n_bars_for_code(conn: sqlite3.Connection, code: str, n: int) -> list[BarRow]:
+    n_i = int(n)
+    if n_i <= 0:
+        return []
+
+    rows = conn.execute(
+        "SELECT date, open, high, low, close, volume FROM bars WHERE code=? ORDER BY date DESC LIMIT ?",
+        (code, n_i),
+    ).fetchall()
+
+    out = [
+        BarRow(
+            date=_str_to_date(r["date"]),
+            open=float(r["open"]),
+            high=float(r["high"]),
+            low=float(r["low"]),
+            close=float(r["close"]),
+            volume=int(r["volume"]),
+        )
+        for r in rows
+    ]
+    out.reverse()  # back to ASC for plotting
+    return out
 
 
 def get_bars_for_code(conn: sqlite3.Connection, code: str, dates: Iterable[dt.date] | None = None) -> list[BarRow]:
