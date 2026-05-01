@@ -20,6 +20,20 @@ CREATE TABLE IF NOT EXISTS day_meta (
   fetched_at TEXT NOT NULL
 );
 
+-- Cache known non-trading days (weekends/holidays) to avoid re-fetching.
+CREATE TABLE IF NOT EXISTS non_trading_days (
+    date TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
+-- Track TWSE T86 fetch attempts per date to avoid repeatedly requesting days that always return empty.
+CREATE TABLE IF NOT EXISTS inst_meta (
+    date TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    count INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS bars (
   date TEXT NOT NULL,
   code TEXT NOT NULL,
@@ -191,7 +205,11 @@ def latest_trading_date(conn: sqlite3.Connection) -> dt.date | None:
 
 def prune_to_last_n_days(conn: sqlite3.Connection, keep_trading_days: int) -> None:
     dates = list_trading_dates(conn, desc=True)
-    if len(dates) <= keep_trading_days:
+    # Guardrail: never prune when DB has fewer than the target days.
+    # This prevents partial sync/crash from deleting most historical data.
+    if len(dates) < keep_trading_days:
+        return
+    if len(dates) == keep_trading_days:
         return
     keep_set = {_date_to_str(d) for d in dates[:keep_trading_days]}
     with conn:

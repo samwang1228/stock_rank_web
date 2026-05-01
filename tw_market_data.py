@@ -273,9 +273,14 @@ def _parse_twse_t86(payload: dict, d: dt.date) -> list[InstitutionTrade]:
     if None in {i_code, i_name, i_foreign, i_trust, i_dealer, i_total}:
         return []
 
+    max_i = max(int(i_code), int(i_name), int(i_foreign), int(i_trust), int(i_dealer), int(i_total))
+
     out: list[InstitutionTrade] = []
     for row in payload.get("data", []) or []:
         if not row:
+            continue
+        # 有些列會缺少尾端欄位（例如部分證券），避免 IndexError
+        if not isinstance(row, list) or len(row) <= max_i:
             continue
         code = str(row[i_code]).strip()
         if not CODE_RE.match(code):
@@ -388,6 +393,15 @@ def _parse_tpex_daily(payload: dict, d: dt.date) -> list[DailyBar]:
     if str(payload.get("stat")).lower() != "ok":
         return []
 
+    # TPEx 在休市/非交易日可能回傳「前一交易日」資料；若日期不一致則視為該日無資料
+    try:
+        payload_date = str(payload.get("date") or "").strip()
+        if payload_date and payload_date.isdigit():
+            if payload_date != d.strftime("%Y%m%d"):
+                return []
+    except Exception:
+        return []
+
     tables = payload.get("tables") or []
     if not tables:
         return []
@@ -422,9 +436,13 @@ def _parse_tpex_daily(payload: dict, d: dt.date) -> list[DailyBar]:
     if None in {i_code, i_name, i_vol, i_open, i_high, i_low, i_close}:
         return []
 
+    max_i = max(int(i_code), int(i_name), int(i_vol), int(i_open), int(i_high), int(i_low), int(i_close))
+
     bars: list[DailyBar] = []
     for row in table.get("data", []):
         if not row:
+            continue
+        if not isinstance(row, list) or len(row) <= max_i:
             continue
         code = str(row[i_code]).strip()
         if not CODE_RE.match(code):
@@ -550,7 +568,29 @@ def fetch_daily_bars(
 
     twse_payload = _load_or_fetch_json(cache_dir, f"twse_{d:%Y%m%d}", _twse_daily_url(d), use_cache=use_cache)
     time.sleep(per_request_delay + random.random() * 0.2)
-    tpex_payload = _load_or_fetch_json(cache_dir, f"tpex_{d:%Y%m%d}", _tpex_daily_url(d), use_cache=use_cache)
+    tpex_cache_key = f"tpex_{d:%Y%m%d}"
+    tpex_url = _tpex_daily_url(d)
+    tpex_payload = _load_or_fetch_json(cache_dir, tpex_cache_key, tpex_url, use_cache=use_cache)
+
+    # TPEx 在休市或端點異常時，可能回傳非查詢日的資料；若遇到日期不一致，嘗試繞過 cache 再抓一次
+    # 以避免 cache 被「錯日資料」污染，導致後續回補永遠拿不到正確日期。
+    try:
+        payload_date = str(tpex_payload.get("date") or "").strip()
+        if payload_date and payload_date.isdigit() and payload_date != d.strftime("%Y%m%d"):
+            fresh = _fetch_json(tpex_url)
+            fresh_date = str(fresh.get("date") or "").strip()
+            if fresh_date and fresh_date.isdigit() and fresh_date == d.strftime("%Y%m%d"):
+                # overwrite cache with the correct payload
+                os.makedirs(cache_dir, exist_ok=True)
+                path = os.path.join(cache_dir, f"{tpex_cache_key}.json")
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(fresh, f, ensure_ascii=False)
+                os.replace(tmp, path)
+                tpex_payload = fresh
+    except Exception:
+        # 保守：出錯就交給 parser 判斷回空
+        pass
 
     return _parse_twse_daily(twse_payload, d), _parse_tpex_daily(tpex_payload, d)
 

@@ -35,6 +35,21 @@ def sync_last_n_trading_days(
         conn.execute("DELETE FROM day_meta WHERE strftime('%w', date) IN ('0','6')")
         conn.execute("DELETE FROM inst_trades WHERE strftime('%w', date) IN ('0','6')")
 
+    # 清除「疑似休市日誤寫」：TWSE=0 但 TPEX>0。
+    # 實務上台股休市多半兩市場同步；若出現 TPEX-only，通常是 TPEx 端點回前一交易日資料造成。
+    log("清理 DB：刪除 TWSE=0 且 TPEX>0 的日期（若有）")
+    with conn:
+        bad_dates = [
+            r["date"]
+            for r in conn.execute(
+                "SELECT date FROM day_meta WHERE twse_count=0 AND tpex_count>0"
+            ).fetchall()
+        ]
+        for ds in bad_dates:
+            conn.execute("DELETE FROM bars WHERE date=?", (ds,))
+            conn.execute("DELETE FROM inst_trades WHERE date=?", (ds,))
+            conn.execute("DELETE FROM day_meta WHERE date=?", (ds,))
+
     def day_counts(d: dt.date) -> tuple[int, int] | None:
         row = conn.execute(
             "SELECT twse_count, tpex_count FROM day_meta WHERE date=?",
@@ -51,16 +66,66 @@ def sync_last_n_trading_days(
         ).fetchone()
         return row is not None
 
+    def inst_attempted(d: dt.date) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM inst_meta WHERE date=? LIMIT 1",
+            (d.isoformat(),),
+        ).fetchone()
+        return row is not None
+
+    def mark_inst_attempt(d: dt.date, *, count: int) -> None:
+        now_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        with conn:
+            conn.execute(
+                "INSERT INTO inst_meta(date, fetched_at, count) VALUES(?,?,?) "
+                "ON CONFLICT(date) DO UPDATE SET fetched_at=excluded.fetched_at, count=excluded.count",
+                (d.isoformat(), now_utc, int(count)),
+            )
+
+    def is_known_non_trading(d: dt.date) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM non_trading_days WHERE date=? LIMIT 1",
+            (d.isoformat(),),
+        ).fetchone()
+        return row is not None
+
+    def mark_non_trading(d: dt.date, *, reason: str) -> None:
+        now_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        with conn:
+            conn.execute(
+                "INSERT INTO non_trading_days(date, reason, fetched_at) VALUES(?,?,?) "
+                "ON CONFLICT(date) DO UPDATE SET reason=excluded.reason, fetched_at=excluded.fetched_at",
+                (d.isoformat(), str(reason), now_utc),
+            )
+
     # 1) 往回掃描直到湊滿 keep_trading_days 個交易日
     collected: list[dt.date] = []
     for day in iter_calendar_days_back(end_date):
         if len(collected) >= keep_trading_days:
             break
+
+        # 週末直接略過
+        if day.weekday() >= 5:
+            continue
+
+        # 已知休市日直接略過（避免每次都打 request）
+        if is_known_non_trading(day):
+            continue
+
         counts = day_counts(day)
 
-        # 已完整存在（行情兩市場都非 0，且法人資料存在）就直接記一個交易日
-        if counts is not None and counts[0] > 0 and counts[1] > 0 and has_inst_trades(day):
+        # 已存在行情資料就直接 skip：不要再打 request
+        # 交易日定義：任一市場有資料即可（TWSE-only 也算，避免 TPEx 端點錯日導致永遠抓不到）。
+        if counts is not None and (counts[0] > 0 or counts[1] > 0):
             collected.append(day)
+
+            # 法人資料只針對「最新幾天」補齊，且只嘗試一次（避免每次 sync 都重抓同一天）
+            if counts[0] > 0 and not has_inst_trades(day) and not inst_attempted(day) and len(collected) <= 5:
+                log(f"補抓法人：{day.isoformat()}（T86）")
+                inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                if inst_trades:
+                    upsert_institution_trades(conn, day, inst_trades)
+                mark_inst_attempt(day, count=len(inst_trades))
             continue
 
         # 否則抓一次該日資料，補齊缺漏
@@ -74,6 +139,7 @@ def sync_last_n_trading_days(
         )
 
         if not twse and not tpex:
+            mark_non_trading(day, reason="no_data")
             continue
 
         now_utc = dt.datetime.now(dt.timezone.utc)
@@ -84,12 +150,29 @@ def sync_last_n_trading_days(
 
         # 上市三大法人（T86）只需要 TWSE；若該日非交易日通常會回空
         time.sleep(request_delay + random.random() * 0.2)
-        inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-        if inst_trades:
-            upsert_institution_trades(conn, day, inst_trades)
+        inst_trades = []
+        if twse and not inst_attempted(day):
+            inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+            if inst_trades:
+                upsert_institution_trades(conn, day, inst_trades)
+            mark_inst_attempt(day, count=len(inst_trades))
+
+        counts_after = day_counts(day)
+        if counts_after is None or (counts_after[0] <= 0 and counts_after[1] <= 0):
+            continue
+
+        # 額外保守：若出現 TPEX-only（TWSE=0, TPEX>0），視為誤寫，刪除並跳過
+        if counts_after[0] <= 0 and counts_after[1] > 0:
+            log(f"跳過：{day.isoformat()}（疑似休市日誤寫：TWSE=0, TPEX={counts_after[1]}）")
+            with conn:
+                conn.execute("DELETE FROM bars WHERE date=?", (day.isoformat(),))
+                conn.execute("DELETE FROM inst_trades WHERE date=?", (day.isoformat(),))
+                conn.execute("DELETE FROM day_meta WHERE date=?", (day.isoformat(),))
+            mark_non_trading(day, reason="tpex_only")
+            continue
 
         collected.append(day)
-        log(f"寫入：TWSE={len(twse)}、TPEX={len(tpex)}、T86={len(inst_trades)}")
+        log(f"寫入：TWSE={counts_after[0]}、TPEX={counts_after[1]}、T86={len(inst_trades)}")
         time.sleep(per_day_delay + random.random() * 0.5)
 
     # 只保留最後 keep_trading_days 個（asc）
