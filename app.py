@@ -185,6 +185,58 @@ def create_app() -> Flask:
         rows.sort(key=lambda x: (-float(x["ratio"]), str(x["code"])))
         return (rows[:limit], older_dates, recent_dates)
 
+    def _turnover_rank(conn, *, days: int, limit: int) -> tuple[list[dict[str, object]], list[dt.date]]:
+        windows = [1, 5, 10, 20, 30]
+        if days not in windows:
+            days = 5
+        if limit <= 0:
+            limit = 200
+
+        used_desc = list_trading_dates(conn, limit=days, desc=True)
+        used_dates = list(reversed(used_desc))
+        if len(used_dates) != days:
+            return ([], [])
+
+        raw = select_close_volume_for_dates(conn, used_dates)
+
+        # 聚合：code -> sum_close, sum_volume, count
+        agg: dict[str, dict[str, object]] = {}
+        for r in raw:
+            code = str(r["code"])
+            d = agg.setdefault(
+                code,
+                {
+                    "code": code,
+                    "name": str(r["name"]),
+                    "sum_close": 0.0,
+                    "sum_volume": 0,
+                    "count": 0,
+                },
+            )
+            d["sum_close"] = float(d["sum_close"]) + float(r["close"])
+            d["sum_volume"] = int(d["sum_volume"]) + int(r["volume"])
+            d["count"] = int(d["count"]) + 1
+
+        rows: list[dict[str, object]] = []
+        for code, d in agg.items():
+            if int(d["count"]) != days:
+                continue
+            sum_close = float(d["sum_close"])
+            sum_volume = int(d["sum_volume"])
+            score = (sum_close * float(sum_volume)) / float(days)
+            rows.append(
+                {
+                    "code": code,
+                    "name": str(d["name"]),
+                    "score": score,
+                    "sum_close": sum_close,
+                    "sum_volume": sum_volume,
+                }
+            )
+
+        rows.sort(key=lambda x: (-float(x["score"]), str(x["code"])))
+        return (rows[:limit], used_dates)
+
     @app.get("/")
     def index():
         return redirect(url_for("gainers"))
@@ -611,47 +663,7 @@ def create_app() -> Flask:
             )
 
         with db_session(db_path) as conn:
-            used_desc = list_trading_dates(conn, limit=days, desc=True)
-            used_dates = list(reversed(used_desc))
-            raw = select_close_volume_for_dates(conn, used_dates)
-
-        # 聚合：code -> sum_close, sum_volume, count
-        agg: dict[str, dict[str, object]] = {}
-        for r in raw:
-            code = str(r["code"])
-            d = agg.setdefault(
-                code,
-                {
-                    "code": code,
-                    "name": str(r["name"]),
-                    "sum_close": 0.0,
-                    "sum_volume": 0,
-                    "count": 0,
-                },
-            )
-            d["sum_close"] = float(d["sum_close"]) + float(r["close"])
-            d["sum_volume"] = int(d["sum_volume"]) + int(r["volume"])
-            d["count"] = int(d["count"]) + 1
-
-        rows = []
-        for code, d in agg.items():
-            if int(d["count"]) != days:
-                continue
-            sum_close = float(d["sum_close"])
-            sum_volume = int(d["sum_volume"])
-            score = (sum_close * float(sum_volume)) / float(days)
-            rows.append(
-                {
-                    "code": code,
-                    "name": str(d["name"]),
-                    "score": score,
-                    "sum_close": sum_close,
-                    "sum_volume": sum_volume,
-                }
-            )
-
-        rows.sort(key=lambda x: (-float(x["score"]), str(x["code"])))
-        rows = rows[:limit]
+            rows, used_dates = _turnover_rank(conn, days=days, limit=limit)
 
         return render_template(
             "turnover.html",
@@ -775,10 +787,16 @@ def create_app() -> Flask:
         cap_topl = to_int(request.args.get("cap_topl"))
         v_days = to_int(request.args.get("v_days"))
         v_topk = to_int(request.args.get("v_topk"))
+        t_days = to_int(request.args.get("t_days"))
+        t_topk = to_int(request.args.get("t_topk"))
 
         vol_windows = [1, 3, 5, 10, 15]
         if v_days is not None and v_days not in vol_windows:
             v_days = None
+
+        turn_windows = [1, 5, 10, 20, 30]
+        if t_days is not None and t_days not in turn_windows:
+            t_days = None
 
         inst_options = [
             ("foreign", "外資"),
@@ -793,6 +811,7 @@ def create_app() -> Flask:
         results: list[dict[str, object]] = []
         used = {
             "returns": bool(n_days and n_topk and asof),
+            "turn": bool(t_days and t_topk and asof),
             "vol": bool(v_days and v_topk and asof),
             "inst": bool(m_days and m_topk and inst and asof),
             "cap": bool(cap_topl),
@@ -811,10 +830,13 @@ def create_app() -> Flask:
                 v_days=v_days,
                 v_topk=v_topk,
                 vol_windows=vol_windows,
+                t_days=t_days,
+                t_topk=t_topk,
+                turn_windows=turn_windows,
                 inst_options=inst_options,
                 used=used,
                 rows=[],
-                note="請至少選一個條件（漲幅 / 量能提升 / 法人買超 / 市值）。",
+                note="請至少選一個條件（漲幅 / 成交值 / 量能提升 / 法人買超 / 市值）。",
             )
 
         with db_session(db_path) as conn:
@@ -871,7 +893,17 @@ def create_app() -> Flask:
                     metrics.setdefault(code, {})["vol_ratio"] = float(r["ratio"])
                     metrics.setdefault(code, {})["vol_pct"] = float(r["pct"])
 
-            # 3) 法人買超 TopK（M 交易日）
+            # 3) 成交值 TopK（T 交易日）
+            if used["turn"] and t_days and t_topk and asof:
+                turn_rows, _used_dates2 = _turnover_rank(conn, days=t_days, limit=t_topk)
+                codes = {str(r["code"]) for r in turn_rows}
+                code_set = codes if code_set is None else (code_set & codes)
+                for r in turn_rows:
+                    code = str(r["code"])
+                    metrics.setdefault(code, {})["name"] = str(r.get("name") or "")
+                    metrics.setdefault(code, {})["turn_score"] = float(r["score"])
+
+            # 4) 法人買超 TopK（M 交易日）
             if used["inst"] and m_days and m_topk and inst:
                 raw, _used_dates = select_institution_net_buy_rank(conn, days=m_days, inst=inst, limit=m_topk)
                 codes = {str(r["code"]) for r in raw}
@@ -881,7 +913,7 @@ def create_app() -> Flask:
                     metrics.setdefault(code, {})["name"] = str(r["name"])
                     metrics.setdefault(code, {})["inst_net"] = int(r["net"])
 
-            # 4) 市值 TopL
+            # 5) 市值 TopL
             if used["cap"] and cap_topl:
                 cap_date = latest_market_cap_date(conn)
                 if not cap_date:
@@ -913,6 +945,8 @@ def create_app() -> Flask:
             note = note or "你有設定漲幅條件，但 DB 交易日資料不足；請先按上方『更新DB』補齊。"
         if used["vol"] and v_days and v_topk and not results and asof is not None:
             note = note or "你有設定量能提升條件，但近 2V 個交易日成交量資料可能不足；請先按上方『更新DB』補齊。"
+        if used["turn"] and t_days and t_topk and not results and asof is not None:
+            note = note or "你有設定成交值條件，但近 T 個交易日資料可能不足；請先按上方『更新DB』補齊。"
 
         return render_template(
             "strategy.html",
@@ -926,6 +960,9 @@ def create_app() -> Flask:
             v_days=v_days,
             v_topk=v_topk,
             vol_windows=vol_windows,
+            t_days=t_days,
+            t_topk=t_topk,
+            turn_windows=turn_windows,
             inst_options=inst_options,
             used=used,
             rows=results,

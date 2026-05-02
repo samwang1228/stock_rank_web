@@ -19,6 +19,12 @@
       <label>Top K（前 K 名）：<input type="number" name="n_topk" value="{{ n_topk or '' }}" placeholder="例如 50" /></label>
     </div>
     <div class="row" style="margin-top: 10px;">
+      <strong>成交值</strong>
+      <label>T天：<input type="number" name="t_days" value="{{ t_days or '' }}" placeholder="例如 5" /></label>
+      <label>Top K（前 K 名）：<input type="number" name="t_topk" value="{{ t_topk or '' }}" placeholder="例如 50" /></label>
+      <span class="muted">（T 可用：{% for w in turn_windows %}{{ w }}{% if not loop.last %}, {% endif %}{% endfor %}；公式： (收盤加總 × 成交量加總) / T）</span>
+    </div>
+    <div class="row" style="margin-top: 10px;">
       <strong>量能提升</strong>
       <label>V天：<input type="number" name="v_days" value="{{ v_days or '' }}" placeholder="例如 5" /></label>
       <label>Top K（前 K 名）：<input type="number" name="v_topk" value="{{ v_topk or '' }}" placeholder="例如 50" /></label>
@@ -63,6 +69,7 @@
           <th>代號</th>
           <th>名稱</th>
           {% if used.returns %}<th class="num">漲幅(%)</th>{% endif %}
+          {% if used.turn %}<th class="num">成交值</th>{% endif %}
           {% if used.vol %}<th class="num">量比</th>{% endif %}
           {% if used.vol %}<th class="num">變化(%)</th>{% endif %}
           {% if used.inst %}<th class="num">買超股數</th>{% endif %}
@@ -75,6 +82,7 @@
             <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
             <td>{{ r.name or '' }}</td>
             {% if used.returns %}<td class="num">{% if r.ret_pct is not none %}{{ '%.2f'|format(r.ret_pct) }}{% else %}-{% endif %}</td>{% endif %}
+            {% if used.turn %}<td class="num">{% if r.turn_score is not none %}{{ '{:,.0f}'.format(r.turn_score) }}{% else %}-{% endif %}</td>{% endif %}
             {% if used.vol %}<td class="num">{% if r.vol_ratio is not none %}{{ '%.2f'|format(r.vol_ratio) }}{% else %}-{% endif %}</td>{% endif %}
             {% if used.vol %}<td class="num">{% if r.vol_pct is not none %}{{ '%.2f'|format(r.vol_pct) }}{% else %}-{% endif %}</td>{% endif %}
             {% if used.inst %}<td class="num">{% if r.inst_net is not none %}{{ '{:,}'.format(r.inst_net) }}{% else %}-{% endif %}</td>{% endif %}
@@ -82,7 +90,7 @@
           </tr>
         {% endfor %}
         {% if rows|length == 0 %}
-          {% set cols = 2 + (1 if used.returns else 0) + (2 if used.vol else 0) + (1 if used.inst else 0) + (1 if used.cap else 0) %}
+          {% set cols = 2 + (1 if used.returns else 0) + (1 if used.turn else 0) + (2 if used.vol else 0) + (1 if used.inst else 0) + (1 if used.cap else 0) %}
           <tr>
             <td colspan="{{ cols }}" class="muted">（沒有結果）</td>
           </tr>
