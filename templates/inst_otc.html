@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>上櫃法人買超排行</h2>
+
+  {% if asof %}
+    <p class="muted">
+      資料截至：{{ asof.strftime('%Y-%m-%d') }}
+      {% if used_dates %}；區間：{{ used_dates[0].strftime('%Y-%m-%d') }} ~ {{ used_dates[-1].strftime('%Y-%m-%d') }}（{{ days }} 交易日）{% endif %}
+    </p>
+  {% else %}
+    <p class="muted">DB 目前沒有資料，請先按上方「更新DB」。</p>
+  {% endif %}
+
+  <div class="card row">
+    <span class="muted">期間：</span>
+    {% for w in windows %}
+      <a href="{{ url_for('inst_rank_otc', days=w, inst=inst) }}">{{ w }}日</a>
+    {% endfor %}
+    <span class="muted">法人（排序依此）：</span>
+    {% for k, label in inst_options %}
+      <a href="{{ url_for('inst_rank_otc', days=days, inst=k) }}">{{ label }}</a>
+    {% endfor %}
+    <span class="muted">（僅上櫃；買超以股數加總）</span>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="font-size: 13px;">
+      欄位說明：外資為「含外資自營商」；自營商為「自行+避險合計」；合計為「外資+投信+自營商」。
+    </div>
+  </div>
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>代號</th>
+          <th>名稱</th>
+          <th class="num">{% if inst in ['foreign', 'foreign_trust'] %}外資*{% else %}外資{% endif %}</th>
+          <th class="num">{% if inst in ['trust', 'foreign_trust'] %}投信*{% else %}投信{% endif %}</th>
+          <th class="num">{% if inst == 'dealer' %}自營商*{% else %}自營商{% endif %}</th>
+          <th class="num">{% if inst == 'total' %}合計*{% else %}合計{% endif %}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td class="num">{{ loop.index }}</td>
+            <td><a href="{{ url_for('kline', code=r.code) }}">{{ r.code }}</a></td>
+            <td>{{ r.name }}</td>
+            <td class="num">{{ '{:,}'.format(r.foreign_net) }}</td>
+            <td class="num">{{ '{:,}'.format(r.trust_net) }}</td>
+            <td class="num">{{ '{:,}'.format(r.dealer_net) }}</td>
+            <td class="num">{{ '{:,}'.format(r.total_net) }}</td>
+          </tr>
+        {% endfor %}
+        {% if not rows %}
+          <tr>
+            <td colspan="7" class="muted">（沒有買超資料；請先更新 DB 或換區間/法人）</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

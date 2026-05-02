@@ -39,7 +39,7 @@ class InstitutionTrade:
     trust_net: int
     dealer_net: int
     total_net: int
-    market: str  # TWSE
+    market: str  # TWSE | TPEX
 
 
 def _to_roc_date(d: dt.date) -> str:
@@ -86,9 +86,21 @@ def _ssl_context() -> ssl.SSLContext:
     try:
         import certifi  # type: ignore
 
-        return ssl.create_default_context(cafile=certifi.where())
+        ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
-        return ssl.create_default_context()
+        ctx = ssl.create_default_context()
+
+    # Some endpoints (notably certain TW/TPEx hosts) may present certificate chains
+    # that fail OpenSSL's strict X.509 checks (e.g., Missing Subject Key Identifier)
+    # on some macOS/Python builds. Relax strict mode while keeping CA verification.
+    try:
+        strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+        if strict_flag:
+            ctx.verify_flags &= ~strict_flag
+    except Exception:
+        pass
+
+    return ctx
 
 
 def _fetch_json_any(url: str, *, timeout: int = 30, retries: int = 3, user_agent: str = DEFAULT_USER_AGENT) -> object:
@@ -249,6 +261,84 @@ def fetch_twse_company_share_info(
 def _twse_t86_url(d: dt.date) -> str:
     # 三大法人買賣超日報（上市）
     return f"https://www.twse.com.tw/fund/T86?response=json&date={d:%Y%m%d}&selectType=ALL"
+
+
+def _tpex_3inst_url(d: dt.date) -> str:
+    # 三大法人買賣明細資訊（上櫃）
+    roc = urllib.parse.quote(_to_roc_date(d))
+    return f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&d={roc}"
+
+
+def _parse_tpex_3inst(payload: dict, d: dt.date) -> list[InstitutionTrade]:
+    if str(payload.get("stat") or "").lower() != "ok":
+        return []
+
+    tables = payload.get("tables") or []
+    if not tables or not isinstance(tables, list):
+        return []
+
+    table = tables[0] if isinstance(tables[0], dict) else None
+    if not table:
+        return []
+
+    # TPEx 回傳的是 ROC 日期字串（例如 115/04/29）。非交易日有時會回前一交易日；若不一致視為無資料。
+    try:
+        table_date = str(table.get("date") or "").strip()
+        if table_date and table_date != _to_roc_date(d):
+            return []
+    except Exception:
+        return []
+
+    fields = [str(x).strip() for x in (table.get("fields") or [])]
+    if len(fields) < 24:
+        return []
+
+    # 欄位順序（fields_len=24, row_len=24）：
+    # 0 code, 1 name,
+    # 2..22: 7 組 (buy,sell,net) => net index = 4,7,10,13,16,19,22
+    # 23: 三大法人買賣超股數合計
+    # 我們採用：
+    # - 外資(含外資自營商) net => index 10
+    # - 投信 net => index 13
+    # - 自營商合計 net => index 22
+    # - 三大法人合計 net => index 23
+    i_code, i_name = 0, 1
+    i_foreign_net, i_trust_net, i_dealer_net, i_total_net = 10, 13, 22, 23
+    max_i = max(i_total_net, i_dealer_net, i_trust_net, i_foreign_net)
+
+    out: list[InstitutionTrade] = []
+    for row in (table.get("data") or []) or []:
+        if not isinstance(row, list) or len(row) <= max_i:
+            continue
+
+        code = str(row[i_code]).strip()
+        if not CODE_RE.match(code):
+            continue
+        name = str(row[i_name]).strip()
+        if _is_derivative_like(name):
+            continue
+
+        foreign_net = _parse_int(row[i_foreign_net])
+        trust_net = _parse_int(row[i_trust_net])
+        dealer_net = _parse_int(row[i_dealer_net])
+        total_net = _parse_int(row[i_total_net])
+        if None in {foreign_net, trust_net, dealer_net, total_net}:
+            continue
+
+        out.append(
+            InstitutionTrade(
+                date=d,
+                code=code,
+                name=name,
+                foreign_net=int(foreign_net),
+                trust_net=int(trust_net),
+                dealer_net=int(dealer_net),
+                total_net=int(total_net),
+                market="TPEX",
+            )
+        )
+
+    return out
 
 
 def _parse_twse_t86(payload: dict, d: dt.date) -> list[InstitutionTrade]:
@@ -500,6 +590,19 @@ def fetch_twse_institution_trades(
         return []
     payload = _load_or_fetch_json(cache_dir, f"twse_t86_{d:%Y%m%d}", _twse_t86_url(d), use_cache=use_cache)
     return _parse_twse_t86(payload, d)
+
+
+def fetch_tpex_institution_trades(
+    d: dt.date,
+    *,
+    cache_dir: str,
+    use_cache: bool = True,
+) -> list[InstitutionTrade]:
+    # 台股不在週六/週日交易；避免週末端點回前一交易日而誤寫日期
+    if d.weekday() >= 5:
+        return []
+    payload = _load_or_fetch_json(cache_dir, f"tpex_3inst_{_to_roc_compact(d)}", _tpex_3inst_url(d), use_cache=use_cache)
+    return _parse_tpex_3inst(payload, d)
 
 
 def fetch_tpex_latest_snapshot(

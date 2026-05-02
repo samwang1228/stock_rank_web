@@ -34,6 +34,16 @@ CREATE TABLE IF NOT EXISTS inst_meta (
     count INTEGER NOT NULL
 );
 
+-- Track institutional fetch attempts per (date, market). Newer version used by both TWSE/TPEX.
+-- Keep the old `inst_meta` for backward compatibility.
+CREATE TABLE IF NOT EXISTS inst_fetch_meta (
+    date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (date, market)
+);
+
 CREATE TABLE IF NOT EXISTS bars (
   date TEXT NOT NULL,
   code TEXT NOT NULL,
@@ -418,6 +428,72 @@ def select_institution_net_buy_rank(
         LIMIT ?
         """,
         (days_i, int(limit)),
+    ).fetchall()
+
+    return rows, used_dates
+
+
+def select_institution_net_buy_rank_full(
+    conn: sqlite3.Connection,
+    *,
+    days: int,
+    inst: str,
+    market: str,
+    limit: int = 200,
+) -> tuple[list[sqlite3.Row], list[dt.date]]:
+    """回傳 (rows, used_dates)。
+
+    rows 欄位：code, name, foreign_net, trust_net, dealer_net, total_net, sort_net
+    used_dates：本次彙總使用到的交易日（asc）
+    """
+
+    market = str(market or "").strip().upper()
+    if market not in {"TWSE", "TPEX"}:
+        raise ValueError(f"Unknown market: {market}")
+
+    inst = (inst or "").strip().lower()
+    col_map = {
+        "foreign": "foreign_net",
+        "trust": "trust_net",
+        "dealer": "dealer_net",
+        "total": "total_net",
+        "foreign_trust": "foreign_net + trust_net",
+    }
+    expr = col_map.get(inst)
+    if not expr:
+        raise ValueError(f"Unknown inst: {inst}")
+
+    days_i = int(days)
+    if days_i <= 0:
+        raise ValueError("days must be positive")
+
+    cur_dates = conn.execute("SELECT date FROM day_meta ORDER BY date DESC LIMIT ?", (days_i,)).fetchall()
+    used_dates = [_str_to_date(r["date"]) for r in cur_dates]
+    used_dates.sort()
+    if not used_dates:
+        return [], []
+
+    rows = conn.execute(
+        f"""
+        WITH last_dates AS (
+          SELECT date FROM day_meta ORDER BY date DESC LIMIT ?
+        )
+        SELECT it.code AS code,
+               MAX(it.name) AS name,
+               SUM(it.foreign_net) AS foreign_net,
+               SUM(it.trust_net) AS trust_net,
+               SUM(it.dealer_net) AS dealer_net,
+               SUM(it.total_net) AS total_net,
+               SUM(it.{expr}) AS sort_net
+        FROM inst_trades it
+        JOIN last_dates ld ON ld.date = it.date
+        WHERE it.market = ?
+        GROUP BY it.code
+        HAVING SUM(it.{expr}) > 0
+        ORDER BY sort_net DESC, it.code ASC
+        LIMIT ?
+        """,
+        (days_i, market, int(limit)),
     ).fetchall()
 
     return rows, used_dates

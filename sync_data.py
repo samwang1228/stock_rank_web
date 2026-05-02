@@ -6,7 +6,7 @@ import time
 from typing import Callable
 
 from stock_db import prune_to_last_n_days, upsert_bars, upsert_institution_trades
-from tw_market_data import fetch_daily_bars, fetch_twse_institution_trades, iter_calendar_days_back
+from tw_market_data import fetch_daily_bars, fetch_tpex_institution_trades, fetch_twse_institution_trades, iter_calendar_days_back
 
 
 def sync_last_n_trading_days(
@@ -59,27 +59,37 @@ def sync_last_n_trading_days(
             return None
         return int(row["twse_count"]), int(row["tpex_count"])
 
-    def has_inst_trades(d: dt.date) -> bool:
+    def has_inst_trades(d: dt.date, *, market: str) -> bool:
         row = conn.execute(
-            "SELECT 1 FROM inst_trades WHERE date=? AND market='TWSE' LIMIT 1",
-            (d.isoformat(),),
+            "SELECT 1 FROM inst_trades WHERE date=? AND market=? LIMIT 1",
+            (d.isoformat(), str(market).upper()),
         ).fetchone()
         return row is not None
 
-    def inst_attempted(d: dt.date) -> bool:
+    def inst_attempted(d: dt.date, *, market: str) -> bool:
+        market_u = str(market).upper()
         row = conn.execute(
-            "SELECT 1 FROM inst_meta WHERE date=? LIMIT 1",
-            (d.isoformat(),),
+            "SELECT 1 FROM inst_fetch_meta WHERE date=? AND market=? LIMIT 1",
+            (d.isoformat(), market_u),
         ).fetchone()
-        return row is not None
+        if row is not None:
+            return True
+        # Backward compatibility: older DB only had TWSE attempt tracking.
+        if market_u == "TWSE":
+            row2 = conn.execute(
+                "SELECT 1 FROM inst_meta WHERE date=? LIMIT 1",
+                (d.isoformat(),),
+            ).fetchone()
+            return row2 is not None
+        return False
 
-    def mark_inst_attempt(d: dt.date, *, count: int) -> None:
+    def mark_inst_attempt(d: dt.date, *, market: str, count: int) -> None:
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         with conn:
             conn.execute(
-                "INSERT INTO inst_meta(date, fetched_at, count) VALUES(?,?,?) "
-                "ON CONFLICT(date) DO UPDATE SET fetched_at=excluded.fetched_at, count=excluded.count",
-                (d.isoformat(), now_utc, int(count)),
+                "INSERT INTO inst_fetch_meta(date, market, fetched_at, count) VALUES(?,?,?,?) "
+                "ON CONFLICT(date, market) DO UPDATE SET fetched_at=excluded.fetched_at, count=excluded.count",
+                (d.isoformat(), str(market).upper(), now_utc, int(count)),
             )
 
     def is_known_non_trading(d: dt.date) -> bool:
@@ -120,12 +130,20 @@ def sync_last_n_trading_days(
             collected.append(day)
 
             # 法人資料只針對「最新幾天」補齊，且只嘗試一次（避免每次 sync 都重抓同一天）
-            if counts[0] > 0 and not has_inst_trades(day) and not inst_attempted(day) and len(collected) <= 5:
-                log(f"補抓法人：{day.isoformat()}（T86）")
-                inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-                if inst_trades:
-                    upsert_institution_trades(conn, day, inst_trades)
-                mark_inst_attempt(day, count=len(inst_trades))
+            if len(collected) <= 5:
+                if counts[0] > 0 and not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
+                    log(f"補抓法人：{day.isoformat()}（TWSE T86）")
+                    inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                    if inst_trades:
+                        upsert_institution_trades(conn, day, inst_trades)
+                    mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
+
+                if counts[1] > 0 and not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
+                    log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
+                    tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                    if tpex_trades:
+                        upsert_institution_trades(conn, day, tpex_trades)
+                    mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
             continue
 
         # 否則抓一次該日資料，補齊缺漏
@@ -148,14 +166,21 @@ def sync_last_n_trading_days(
         if tpex:
             upsert_bars(conn, day, tpex, fetched_at=now_utc)
 
-        # 上市三大法人（T86）只需要 TWSE；若該日非交易日通常會回空
+        # 法人資料（TWSE T86 / TPEX 3inst）：若該日非交易日通常會回空
         time.sleep(request_delay + random.random() * 0.2)
-        inst_trades = []
-        if twse and not inst_attempted(day):
-            inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-            if inst_trades:
-                upsert_institution_trades(conn, day, inst_trades)
-            mark_inst_attempt(day, count=len(inst_trades))
+        inst_twse = []
+        inst_tpex = []
+        if twse and not inst_attempted(day, market="TWSE"):
+            inst_twse = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+            if inst_twse:
+                upsert_institution_trades(conn, day, inst_twse)
+            mark_inst_attempt(day, market="TWSE", count=len(inst_twse))
+
+        if tpex and not inst_attempted(day, market="TPEX"):
+            inst_tpex = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+            if inst_tpex:
+                upsert_institution_trades(conn, day, inst_tpex)
+            mark_inst_attempt(day, market="TPEX", count=len(inst_tpex))
 
         counts_after = day_counts(day)
         if counts_after is None or (counts_after[0] <= 0 and counts_after[1] <= 0):
@@ -172,7 +197,7 @@ def sync_last_n_trading_days(
             continue
 
         collected.append(day)
-        log(f"寫入：TWSE={counts_after[0]}、TPEX={counts_after[1]}、T86={len(inst_trades)}")
+        log(f"寫入：TWSE={counts_after[0]}、TPEX={counts_after[1]}、T86={len(inst_twse)}、TPEX3I={len(inst_tpex)}")
         time.sleep(per_day_delay + random.random() * 0.5)
 
     # 只保留最後 keep_trading_days 個（asc）

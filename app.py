@@ -21,6 +21,7 @@ from stock_db import (
     select_closes_for_last_n_trading_days,
     select_close_volume_for_dates,
     select_institution_net_buy_rank,
+    select_institution_net_buy_rank_full,
     select_market_cap_top,
     upsert_market_caps,
     upsert_bars_partial,
@@ -752,6 +753,56 @@ def create_app() -> Flask:
 
         return render_template(
             "inst.html",
+            asof=asof,
+            days=days,
+            inst=inst,
+            windows=windows,
+            inst_options=inst_options,
+            used_dates=used_dates,
+            rows=rows,
+        )
+
+    @app.get("/inst-otc")
+    def inst_rank_otc():
+        """上櫃三大法人買超排行（依日資料彙總）。"""
+
+        asof = get_db_latest_date()
+        days = int(request.args.get("days", "1"))
+        inst = (request.args.get("inst", "foreign") or "foreign").strip().lower()
+
+        windows = [1, 5, 20, 30]
+        inst_options = [
+            ("foreign", "外資"),
+            ("trust", "投信"),
+            ("dealer", "自營商"),
+            ("total", "三大合計"),
+            ("foreign_trust", "外資+投信"),
+        ]
+        inst_allowed = {k for k, _ in inst_options}
+
+        if days not in windows:
+            days = 1
+        if inst not in inst_allowed:
+            inst = "foreign"
+
+        with db_session(db_path) as conn:
+            raw_rows, used_dates = select_institution_net_buy_rank_full(conn, days=days, inst=inst, market="TPEX", limit=200)
+
+        rows = [
+            {
+                "code": str(r["code"]),
+                "name": str(r["name"]),
+                "foreign_net": int(r["foreign_net"]),
+                "trust_net": int(r["trust_net"]),
+                "dealer_net": int(r["dealer_net"]),
+                "total_net": int(r["total_net"]),
+                "sort_net": int(r["sort_net"]),
+            }
+            for r in raw_rows
+        ]
+
+        return render_template(
+            "inst_otc.html",
             asof=asof,
             days=days,
             inst=inst,
