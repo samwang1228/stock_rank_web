@@ -41,9 +41,10 @@ PORT=5001 /Users/wangshaocheng/anaconda3/envs/stock/bin/python app.py
 3. 成交量變化排行排名
 4. K 線：畫近60天交易日的個股K線
 5. 接近 MA：列出目前股價接近不同天數均線的股票
-6. 法人買超：提供不同天數台股法人買超排名
-7. 市值排名：提供台股市值排行
-8. 策略：可以根據上述策略找出符合共通條件的股票
+6. 當月營收排行: 可以根據YoY MoM進行排序顯示
+7. 法人買超：提供不同天數台股法人買超排名
+8. 市值排名：提供台股市值排行
+9. 策略：可以根據上述策略找出符合共通條件的股票
 - CLI 腳本：簡單篩選（保留）
 
 ## 資料來源：
@@ -91,6 +92,7 @@ PORT=5001 python app.py
 - http://127.0.0.1:5000/turnover
 - http://127.0.0.1:5000/kline
 - http://127.0.0.1:5000/near-ma
+- http://127.0.0.1:5000/revenue
 - http://127.0.0.1:5000/inst
 - http://127.0.0.1:5000/market-cap
 - http://127.0.0.1:5000/strategy
@@ -106,9 +108,13 @@ PORT=5001 python app.py
 
 ### 成交量變化
 ![成交量變化](img/vol-up.png)
+
 ### 接近 MA
 
 ![今日收盤價接近 MA](img/closeMA.png)
+
+### 營收變化排行
+![營收](img/revenue.png)
 
 ### 更新 DB（進度/Log）
 

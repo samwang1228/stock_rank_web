@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="row">
+    <div class="card" style="flex: 1;">
+      <h2 style="margin-top:0;">月營收查詢</h2>
+      <form class="row" method="get" action="{{ url_for('revenue') }}" style="margin: 0;">
+        <label>
+          年份
+          <input name="year" type="number" min="1" step="1" value="{{ year or '' }}" placeholder="2026 或 115" />
+        </label>
+        <label>
+          月份
+          <input name="month" type="number" min="1" max="12" step="1" value="{{ month or '' }}" placeholder="1~12" />
+        </label>
+        <label>
+          市場
+          <select name="market" style="border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:14px;background:#fff;">
+            {% for m in markets %}
+              <option value="{{ m.value }}" {% if market == m.value %}selected{% endif %}>{{ m.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          產業
+          <select name="industry" style="border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:14px;background:#fff; min-width: 180px;">
+            <option value="">全部</option>
+            {% for ind in industries %}
+              <option value="{{ ind }}" {% if industry == ind %}selected{% endif %}>{{ ind }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          排序
+          <select name="sort" style="border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:14px;background:#fff; min-width: 220px;">
+            {% for col in sort_columns %}
+              <option value="{{ col }}" {% if sort == col %}selected{% endif %}>{{ col }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          順序
+          <select name="order" style="border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:14px;background:#fff;">
+            <option value="desc" {% if order == 'desc' %}selected{% endif %}>大 → 小</option>
+            <option value="asc" {% if order == 'asc' %}selected{% endif %}>小 → 大</option>
+          </select>
+        </label>
+        <button type="submit">查詢</button>
+      </form>
+
+      {% if note %}
+        <p class="muted">{{ note }}</p>
+      {% endif %}
+      {% if error %}
+        <p style="color:#b00020;">{{ error }}</p>
+      {% endif %}
+      {% if meta %}
+        <p class="muted">來源：{{ meta }}</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="card table-card">
+    {% if rows and columns %}
+      <table>
+        <thead>
+          <tr>
+            {% for c in columns %}
+              <th class="{% if c in numeric_columns %}num{% endif %}">{{ c }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+            <tr>
+              {% for c in columns %}
+                <td class="{% if c in numeric_columns %}num{% endif %}">{{ r.get(c, '') }}</td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted" style="margin:0;">請先輸入年份/月份後查詢。</p>
+    {% endif %}
+  </div>
+{% endblock %}

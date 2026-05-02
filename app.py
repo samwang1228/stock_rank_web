@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 import threading
 import time
 from dataclasses import dataclass
 
+import pandas as pd
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+from industry import industry as industry_map
+from monthly_revenue_exporter import MonthlyRevenueExporter
 from stock_db import (
     db_session,
     get_bars_for_code,
@@ -118,6 +122,41 @@ def create_app() -> Flask:
                 _log(f"總耗時 {time.time() - t0:.1f}s")
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _month_default() -> tuple[int, int]:
+        # 預設帶「上個月」，避免一進頁面就打到還沒公告的當月
+        today = dt.date.today()
+        first = today.replace(day=1)
+        prev = first - dt.timedelta(days=1)
+        return prev.year, prev.month
+
+    def _format_cell(col: str, v: object) -> str:
+        if v is None:
+            return ""
+        try:
+            if isinstance(v, float) and (math.isnan(v) or pd.isna(v)):
+                return ""
+        except Exception:
+            pass
+
+        pct_cols = {"上月比較增減(%)", "去年同月增減(%)", "前期比較增減(%)"}
+        if col in pct_cols:
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return str(v)
+
+        num_cols = {"當月營收", "上月營收", "去年當月營收", "當月累計營收", "去年累計營收"}
+        if col in num_cols:
+            try:
+                x = float(v)
+                if math.isnan(x):
+                    return ""
+                return f"{int(round(x)):,}"
+            except Exception:
+                return str(v)
+
+        return str(v)
 
     def _volume_up_rank(conn, *, days: int, limit: int) -> tuple[list[dict[str, object]], list[dt.date], list[dt.date]]:
         windows = [1, 3, 5, 10, 15]
@@ -631,6 +670,151 @@ def create_app() -> Flask:
             threshold_pct=threshold_pct,
             rows=table,
             sort_key=sort_key,
+        )
+
+    @app.get("/revenue")
+    def revenue():
+        markets = [
+            {"value": "tse", "label": "上市"},
+            {"value": "otc", "label": "上櫃"},
+            {"value": "rotc", "label": "興櫃"},
+        ]
+        market_values = {m["value"] for m in markets}
+
+        sort_columns = [
+            "當月營收",
+            "上月營收",
+            "去年當月營收",
+            "上月比較增減(%)",
+            "去年同月增減(%)",
+            "當月累計營收",
+            "去年累計營收",
+            "前期比較增減(%)",
+        ]
+
+        year_q = (request.args.get("year") or "").strip()
+        month_q = (request.args.get("month") or "").strip()
+        market = (request.args.get("market") or "tse").strip().lower()
+        industry_q = (request.args.get("industry") or "").strip()
+        sort = (request.args.get("sort") or "當月營收").strip()
+        order = (request.args.get("order") or "desc").strip().lower()
+
+        if market not in market_values:
+            market = "tse"
+        if sort not in sort_columns:
+            sort = "當月營收"
+        if order not in {"asc", "desc"}:
+            order = "desc"
+
+        # 初次進頁面：只顯示表單（不自動抓資料）
+        if not year_q or not month_q:
+            y0, m0 = _month_default()
+            return render_template(
+                "revenue.html",
+                title="月營收",
+                year=y0,
+                month=m0,
+                market=market,
+                markets=markets,
+                industry=industry_q,
+                industries=[],
+                sort=sort,
+                order=order,
+                sort_columns=sort_columns,
+                columns=[],
+                numeric_columns=set(sort_columns),
+                rows=[],
+                meta=None,
+                note="請輸入年份/月份後查詢；若 revenue 目錄已有 CSV 會直接讀快取。",
+                error=None,
+            )
+
+        error = None
+        note = None
+        meta = None
+        rows_out: list[dict[str, str]] = []
+        industries: list[str] = []
+        columns: list[str] = []
+
+        try:
+            year_i = int(year_q)
+            month_i = int(month_q)
+            _, ad_year = MonthlyRevenueExporter._normalize_year(year_i)
+            month_i = MonthlyRevenueExporter._normalize_month(month_i)
+
+            revenue_dir = os.path.join(BASE_DIR, "revenue")
+            os.makedirs(revenue_dir, exist_ok=True)
+            csv_name = f"{market}_{ad_year}_{month_i:02d}.csv"
+            csv_path = os.path.join(revenue_dir, csv_name)
+
+            from_cache = os.path.exists(csv_path)
+            if not from_cache:
+                exporter = MonthlyRevenueExporter(out_dir=revenue_dir)
+                csv_path = exporter.fetch_and_save(year=year_i, month=month_i, market=market)  # type: ignore[arg-type]
+                note = "已下載並快取到 revenue/；下次查詢同年月會直接讀 CSV。"
+            else:
+                note = "已從 revenue/ 快取讀取（未重新抓取）。"
+
+            meta = os.path.basename(csv_path)
+            df = pd.read_csv(csv_path)
+
+            if "公司代號" in df.columns:
+                codes = df["公司代號"].astype(str).str.strip()
+                df["產業"] = codes.map(lambda c: industry_map.get(c, "未知"))
+            else:
+                df["產業"] = "未知"
+
+            # 產業下拉：依本次檔案出現的產業列出（含 未知）
+            try:
+                uniq = [str(x) for x in df["產業"].dropna().unique().tolist()]
+                uniq = [x for x in uniq if x]
+                industries = sorted(uniq)
+            except Exception:
+                industries = []
+
+            if industry_q:
+                df = df[df["產業"] == industry_q]
+
+            # 排序：只允許指定欄位（若該 CSV 沒有該欄則不排序）
+            ascending = order == "asc"
+            if sort in df.columns:
+                by = [sort]
+                asc_list = [ascending]
+                if "公司代號" in df.columns:
+                    by.append("公司代號")
+                    asc_list.append(True)
+                df = df.sort_values(by=by, ascending=asc_list, na_position="last")
+
+            base_cols = [c for c in ["公司代號", "公司名稱", "產業"] if c in df.columns]
+            data_cols = [c for c in sort_columns if c in df.columns]
+            columns = base_cols + data_cols
+
+            for _, r in df.iterrows():
+                out: dict[str, str] = {}
+                for c in columns:
+                    out[c] = _format_cell(c, r.get(c))
+                rows_out.append(out)
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+
+        return render_template(
+            "revenue.html",
+            title="月營收",
+            year=year_q,
+            month=month_q,
+            market=market,
+            markets=markets,
+            industry=industry_q,
+            industries=industries,
+            sort=sort,
+            order=order,
+            sort_columns=sort_columns,
+            columns=columns,
+            numeric_columns=set(sort_columns),
+            rows=rows_out,
+            meta=meta,
+            note=note,
+            error=error,
         )
 
     @app.get("/turnover")
