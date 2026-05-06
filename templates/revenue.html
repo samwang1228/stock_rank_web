@@ -76,7 +76,13 @@
           {% for r in rows %}
             <tr>
               {% for c in columns %}
-                <td class="{% if c in numeric_columns %}num{% endif %}">{{ r.get(c, '') }}</td>
+                <td class="{% if c in numeric_columns %}num{% endif %}">
+                  {% if c == '公司代號' and r.get(c) %}
+                    <a class="linklike" href="{{ url_for('kline', code=r.get(c)) }}">{{ r.get(c, '') }}</a>
+                  {% else %}
+                    {{ r.get(c, '') }}
+                  {% endif %}
+                </td>
               {% endfor %}
             </tr>
           {% endfor %}
