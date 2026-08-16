@@ -6,7 +6,14 @@ import time
 from typing import Callable
 
 from stock_db import prune_to_last_n_days, upsert_bars, upsert_institution_trades
-from tw_market_data import fetch_daily_bars, fetch_tpex_institution_trades, fetch_twse_institution_trades, iter_calendar_days_back
+from tw_market_data import (
+    fetch_daily_bars,
+    fetch_tpex_daily_bars,
+    fetch_tpex_institution_trades,
+    fetch_twse_daily_bars,
+    fetch_twse_institution_trades,
+    iter_calendar_days_back,
+)
 
 
 def sync_last_n_trading_days(
@@ -124,26 +131,61 @@ def sync_last_n_trading_days(
 
         counts = day_counts(day)
 
-        # 已存在行情資料就直接 skip：不要再打 request
-        # 交易日定義：任一市場有資料即可（TWSE-only 也算，避免 TPEx 端點錯日導致永遠抓不到）。
-        if counts is not None and (counts[0] > 0 or counts[1] > 0):
+        # 兩個市場都齊全時才直接略過。
+        if counts is not None and counts[0] > 0 and counts[1] > 0:
             collected.append(day)
 
             # 法人資料只針對「最新幾天」補齊，且只嘗試一次（避免每次 sync 都重抓同一天）
             if len(collected) <= 5:
-                if counts[0] > 0 and not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
+                if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
                     log(f"補抓法人：{day.isoformat()}（TWSE T86）")
                     inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
                     if inst_trades:
                         upsert_institution_trades(conn, day, inst_trades)
                     mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
 
-                if counts[1] > 0 and not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
+                if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
                     log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
                     tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
                     if tpex_trades:
                         upsert_institution_trades(conn, day, tpex_trades)
                     mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
+            continue
+
+        # 若已有其中一邊的行情資料，但另一邊缺漏，補抓缺的市場。
+        if counts is not None:
+            if counts[0] <= 0:
+                log(f"補抓行情：{day.isoformat()}（TWSE）")
+                twse = fetch_twse_daily_bars(day, cache_dir=cache_dir, use_cache=use_cache)
+                if twse:
+                    upsert_bars(conn, day, twse, fetched_at=dt.datetime.now(dt.timezone.utc))
+
+            if counts[1] <= 0:
+                log(f"補抓行情：{day.isoformat()}（TPEX）")
+                tpex = fetch_tpex_daily_bars(day, cache_dir=cache_dir, use_cache=use_cache)
+                if tpex:
+                    upsert_bars(conn, day, tpex, fetched_at=dt.datetime.now(dt.timezone.utc))
+
+            counts_after = day_counts(day)
+            if counts_after is not None and counts_after[0] > 0 and counts_after[1] > 0:
+                collected.append(day)
+                log(f"寫入補缺：TWSE={counts_after[0]}、TPEX={counts_after[1]}")
+
+                if len(collected) <= 5:
+                    if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
+                        log(f"補抓法人：{day.isoformat()}（TWSE T86）")
+                        inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                        if inst_trades:
+                            upsert_institution_trades(conn, day, inst_trades)
+                        mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
+
+                    if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
+                        log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
+                        tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                        if tpex_trades:
+                            upsert_institution_trades(conn, day, tpex_trades)
+                        mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
+
             continue
 
         # 否則抓一次該日資料，補齊缺漏
@@ -208,6 +250,41 @@ def sync_last_n_trading_days(
     start_date = collected[0]
     latest_date = collected[-1]
     log(f"回補完成：{start_date.isoformat()} ~ {latest_date.isoformat()}（{len(collected)} 交易日）")
+
+    # 若上櫃歷史資料仍明顯不足，使用 yfinance 對最近區間做一次批次回補。
+    # 這是主要的歷史補齊來源；TPEx 的日線端點對過去日期並不穩定。
+    tpex_counts = []
+    for day in collected:
+        counts = day_counts(day)
+        tpex_counts.append(0 if counts is None else int(counts[1]))
+
+    if tpex_counts and min(tpex_counts) <= 1:
+        log("偵測到上櫃歷史資料偏少，啟動 yfinance 批次回補")
+        try:
+            from otc_backfill import backfill_otc_ohlcv
+            from tw_market_data import fetch_tpex_latest_snapshot
+
+            snapshot_date, snapshot_bars = fetch_tpex_latest_snapshot(cache_dir=cache_dir, use_cache=use_cache)
+            codes = sorted({bar.code for bar in snapshot_bars})
+            name_by_code = {bar.code: bar.name for bar in snapshot_bars}
+            if codes:
+                log(f"TPEX 批次回補：{snapshot_date.isoformat()}，共 {len(codes)} 檔")
+                grouped = backfill_otc_ohlcv(
+                    codes,
+                    start_date=start_date,
+                    end_date=latest_date,
+                    name_by_code=name_by_code,
+                    chunk_size=80,
+                    chunk_delay=0.8,
+                )
+                if grouped:
+                    now_utc = dt.datetime.now(dt.timezone.utc)
+                    for day, day_bars in grouped.items():
+                        if day_bars:
+                            upsert_bars(conn, day, day_bars, fetched_at=now_utc)
+                    log(f"TPEX 批次回補完成：{len(grouped)} 個交易日")
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            log(f"TPEX 批次回補失敗：{exc}")
 
     # 2) prune 舊資料（以交易日數為準）
     log(f"Prune：只保留最後 {keep_trading_days} 個交易日")

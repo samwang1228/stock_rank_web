@@ -579,6 +579,19 @@ def fetch_twse_daily_bars(
     return _parse_twse_daily(payload, d)
 
 
+def fetch_tpex_daily_bars(
+    d: dt.date,
+    *,
+    cache_dir: str,
+    use_cache: bool = True,
+) -> list[DailyBar]:
+    # 台股不在週六/週日交易；避免週末端點回前一交易日而誤寫日期
+    if d.weekday() >= 5:
+        return []
+    payload = _load_or_fetch_json(cache_dir, f"tpex_{d:%Y%m%d}", _tpex_daily_url(d), use_cache=use_cache)
+    return _parse_tpex_daily(payload, d)
+
+
 def fetch_twse_institution_trades(
     d: dt.date,
     *,
