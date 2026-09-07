@@ -31,4 +31,34 @@
       Plotly.newPlot('chart', fig.data, fig.layout, {responsive: true});
     </script>
   {% endif %}
+
+  {% if code and institution_rows %}
+    <div class="card">
+      <h3>近十個交易日法人買賣超（張）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>外資（張）</th>
+            <th>投信（張）</th>
+            <th>自營商（張）</th>
+            <th>三大法人合計（張）</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in institution_rows %}
+            <tr>
+              <td>{{ row['date'] }}</td>
+              <td class="{% if row['foreign_net'] > 0 %}positive{% elif row['foreign_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['foreign_net'] / 1000)|int) }}</td>
+              <td class="{% if row['trust_net'] > 0 %}positive{% elif row['trust_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['trust_net'] / 1000)|int) }}</td>
+              <td class="{% if row['dealer_net'] > 0 %}positive{% elif row['dealer_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['dealer_net'] / 1000)|int) }}</td>
+              <td class="{% if row['total_net'] > 0 %}positive{% elif row['total_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['total_net'] / 1000)|int) }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif code %}
+    <p class="muted">查無這檔股票近十個交易日的法人資料。</p>
+  {% endif %}
 {% endblock %}

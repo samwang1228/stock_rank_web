@@ -433,6 +433,33 @@ def select_institution_net_buy_rank(
     return rows, used_dates
 
 
+def select_institution_trades_for_code(
+    conn: sqlite3.Connection,
+    *,
+    code: str,
+    days: int = 10,
+) -> list[sqlite3.Row]:
+    """回傳指定股票近 N 個交易日的法人買賣超資料（日期升冪）。"""
+
+    days_i = int(days)
+    if days_i <= 0:
+        raise ValueError("days must be positive")
+
+    return conn.execute(
+        """
+        WITH last_dates AS (
+          SELECT date FROM day_meta ORDER BY date DESC LIMIT ?
+        )
+        SELECT it.date, it.foreign_net, it.trust_net, it.dealer_net, it.total_net
+        FROM inst_trades it
+        JOIN last_dates ld ON ld.date = it.date
+        WHERE it.code = ?
+        ORDER BY it.date DESC
+        """,
+        (days_i, code),
+    ).fetchall()
+
+
 def select_institution_net_buy_rank_full(
     conn: sqlite3.Connection,
     *,

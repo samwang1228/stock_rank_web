@@ -26,6 +26,7 @@ from stock_db import (
     select_close_volume_for_dates,
     select_institution_net_buy_rank,
     select_institution_net_buy_rank_full,
+    select_institution_trades_for_code,
     select_market_cap_top,
     upsert_market_caps,
     upsert_bars_partial,
@@ -477,11 +478,13 @@ def create_app() -> Flask:
         code = (request.args.get("code") or "").strip()
         name = None
         plot_json = None
+        institution_rows = []
 
         if code:
             with db_session(db_path) as conn:
                 bars = get_last_n_bars_for_code(conn, code, 60)
                 name = get_code_name(conn, code)
+                institution_rows = select_institution_trades_for_code(conn, code=code, days=10)
 
                 # Best-effort OTC (TPEX) backfill: only when we already know this
                 # code is TPEX and DB bars are insufficient.
@@ -585,7 +588,14 @@ def create_app() -> Flask:
 
                 plot_json = fig.to_json()
 
-        return render_template("kline.html", asof=asof, code=code, name=name, plot_json=plot_json)
+        return render_template(
+            "kline.html",
+            asof=asof,
+            code=code,
+            name=name,
+            plot_json=plot_json,
+            institution_rows=institution_rows,
+        )
 
     @app.get("/near-ma")
     def near_ma():
