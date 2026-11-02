@@ -90,7 +90,22 @@ CREATE TABLE IF NOT EXISTS market_caps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_market_caps_asof_cap ON market_caps(asof_date, market_cap DESC);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL
+);
 """
+
+DEFAULT_WATCHLIST = (
+    ("3711", "日月光投控", 1),
+    ("2449", "京元電子", 2),
+    ("3450", "聯鈞", 3),
+    ("2408", "南亞科", 4),
+    ("8358", "金居", 5),
+    ("2454", "聯發科", 6),
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +125,10 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    conn.executemany(
+        "INSERT OR IGNORE INTO watchlist(code, name, sort_order) VALUES(?,?,?)",
+        DEFAULT_WATCHLIST,
+    )
     conn.commit()
 
 
@@ -342,6 +361,26 @@ def get_code_name(conn: sqlite3.Connection, code: str) -> str | None:
     cur = conn.execute("SELECT name FROM bars WHERE code=? ORDER BY date DESC LIMIT 1", (code,))
     row = cur.fetchone()
     return str(row["name"]) if row else None
+
+
+def list_watchlist(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT code, name FROM watchlist ORDER BY sort_order ASC, code ASC"
+    ).fetchall()
+
+
+def add_watchlist_code(conn: sqlite3.Connection, code: str, name: str) -> None:
+    row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order FROM watchlist").fetchone()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist(code, name, sort_order) VALUES(?,?,?)",
+            (code, name, int(row["next_order"])),
+        )
+
+
+def delete_watchlist_code(conn: sqlite3.Connection, code: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM watchlist WHERE code=?", (code,))
 
 
 def select_closes_for_dates(conn: sqlite3.Connection, dates: list[dt.date]) -> list[sqlite3.Row]:

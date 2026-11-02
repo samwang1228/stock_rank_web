@@ -30,6 +30,9 @@ from stock_db import (
     select_market_cap_top,
     upsert_market_caps,
     upsert_bars_partial,
+    add_watchlist_code,
+    delete_watchlist_code,
+    list_watchlist,
 )
 from sync_data import sync_last_n_trading_days
 from tw_market_data import fetch_twse_company_share_info
@@ -596,6 +599,63 @@ def create_app() -> Flask:
             plot_json=plot_json,
             institution_rows=institution_rows,
         )
+
+    @app.route("/watchlist", methods=["GET", "POST"])
+    def watchlist():
+        error = None
+        if request.method == "POST":
+            action = (request.form.get("action") or "").strip()
+            code = (request.form.get("code") or "").strip()
+            with db_session(db_path) as conn:
+                if action == "delete":
+                    delete_watchlist_code(conn, code)
+                elif action == "add":
+                    if not code.isdigit() or not 4 <= len(code) <= 6:
+                        error = "請輸入 4 到 6 碼的股票代號。"
+                    else:
+                        name = get_code_name(conn, code)
+                        if not name:
+                            error = "找不到這個股票代號，請先更新 DB。"
+                        else:
+                            add_watchlist_code(conn, code, name)
+            if error is None:
+                return redirect(url_for("watchlist"))
+
+        asof = get_db_latest_date()
+        cards = []
+        with db_session(db_path) as conn:
+            for item in list_watchlist(conn):
+                code = str(item["code"])
+                name = str(item["name"])
+                bars = get_last_n_bars_for_code(conn, code, 60)
+                institution_rows = select_institution_trades_for_code(conn, code=code, days=10)
+                plot_json = None
+                if bars:
+                    import plotly.graph_objects as go
+                    from plotly.subplots import make_subplots
+
+                    x = [b.date for b in bars]
+                    o = [b.open for b in bars]
+                    h = [b.high for b in bars]
+                    l = [b.low for b in bars]
+                    closes = [b.close for b in bars]
+                    v = [b.volume for b in bars]
+
+                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
+                    fig.add_trace(go.Candlestick(x=x, open=o, high=h, low=l, close=closes, name="日K", increasing_line_color="red", increasing_fillcolor="red", decreasing_line_color="green", decreasing_fillcolor="green"), row=1, col=1)
+                    for window in (5, 10, 20, 60):
+                        ma_values = []
+                        for index in range(len(closes)):
+                            ma_values.append(_ma(closes[: index + 1], window))
+                        fig.add_trace(go.Scatter(x=x, y=ma_values, mode="lines", name=f"MA{window}"), row=1, col=1)
+                    colors = ["red" if closes[i] >= o[i] else "green" for i in range(len(closes))]
+                    fig.add_trace(go.Bar(x=x, y=v, marker_color=colors, name="成交量"), row=2, col=1)
+                    fig.update_layout(xaxis_rangeslider_visible=False, height=600, margin=dict(l=40, r=20, t=40, b=30), legend=dict(orientation="h"))
+                    plot_json = fig.to_json()
+
+                cards.append({"code": code, "name": name, "plot_json": plot_json, "institution_rows": institution_rows})
+
+        return render_template("watchlist.html", asof=asof, cards=cards, error=error)
 
     @app.get("/near-ma")
     def near_ma():

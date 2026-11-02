@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block head %}
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+{% endblock %}
+
+{% block content %}
+  <h2>自選股</h2>
+  {% if asof %}
+    <p class="muted">DB 資料截至：{{ asof.strftime('%Y-%m-%d') }}</p>
+  {% endif %}
+
+  <form class="row card" method="post" action="{{ url_for('watchlist') }}">
+    <input type="hidden" name="action" value="add" />
+    <label>新增股票代號：
+      <input name="code" placeholder="例如 2330" inputmode="numeric" />
+    </label>
+    <button type="submit">新增</button>
+  </form>
+  {% if error %}<p class="negative">{{ error }}</p>{% endif %}
+
+  {% for card in cards %}
+    <section class="card">
+      <div class="row">
+        <h3>{{ card.name }}（{{ card.code }}）</h3>
+        <a href="{{ url_for('kline', code=card.code) }}">開啟完整 K 線</a>
+        <form method="post" action="{{ url_for('watchlist') }}" style="margin-left:auto;">
+          <input type="hidden" name="action" value="delete" />
+          <input type="hidden" name="code" value="{{ card.code }}" />
+          <button type="submit">刪除</button>
+        </form>
+      </div>
+
+      {% if card.plot_json %}
+        <div id="chart-{{ card.code }}"></div>
+        <script>
+          const fig{{ card.code }} = JSON.parse({{ card.plot_json|tojson }});
+          Plotly.newPlot('chart-{{ card.code }}', fig{{ card.code }}.data, fig{{ card.code }}.layout, {responsive: true});
+        </script>
+      {% else %}
+        <p class="muted">查無 K 線資料，請先更新 DB。</p>
+      {% endif %}
+
+      {% if card.institution_rows %}
+        <h4>近十個交易日法人買賣超（張）</h4>
+        <table>
+          <thead>
+            <tr>
+              <th>日期</th>
+              <th>外資（張）</th>
+              <th>投信（張）</th>
+              <th>自營商（張）</th>
+              <th>三大法人合計（張）</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in card.institution_rows %}
+              <tr>
+                <td>{{ row['date'] }}</td>
+                <td class="{% if row['foreign_net'] > 0 %}positive{% elif row['foreign_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['foreign_net'] / 1000)|int) }}</td>
+                <td class="{% if row['trust_net'] > 0 %}positive{% elif row['trust_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['trust_net'] / 1000)|int) }}</td>
+                <td class="{% if row['dealer_net'] > 0 %}positive{% elif row['dealer_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['dealer_net'] / 1000)|int) }}</td>
+                <td class="{% if row['total_net'] > 0 %}positive{% elif row['total_net'] < 0 %}negative{% endif %}">{{ '{:,}'.format((row['total_net'] / 1000)|int) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">查無近十個交易日的法人資料。</p>
+      {% endif %}
+    </section>
+    <div class="spacer"></div>
+  {% endfor %}
+{% endblock %}
