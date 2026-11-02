@@ -24,6 +24,7 @@ from stock_db import (
     select_closes_for_dates,
     select_closes_for_last_n_trading_days,
     select_close_volume_for_dates,
+    select_institution_consecutive_buy,
     select_institution_net_buy_rank,
     select_institution_net_buy_rank_full,
     select_institution_trades_for_code,
@@ -1088,6 +1089,7 @@ def create_app() -> Flask:
         n_topk = to_int(request.args.get("n_topk"))
         m_days = to_int(request.args.get("m_days"))
         m_topk = to_int(request.args.get("m_topk"))
+        c_days = to_int(request.args.get("c_days"))
         inst = (request.args.get("inst") or "").strip().lower() or None
         cap_topl = to_int(request.args.get("cap_topl"))
         v_days = to_int(request.args.get("v_days"))
@@ -1119,6 +1121,7 @@ def create_app() -> Flask:
             "turn": bool(t_days and t_topk and asof),
             "vol": bool(v_days and v_topk and asof),
             "inst": bool(m_days and m_topk and inst and asof),
+            "inst_consecutive": bool(c_days and inst and asof),
             "cap": bool(cap_topl),
         }
 
@@ -1130,6 +1133,7 @@ def create_app() -> Flask:
                 n_topk=n_topk,
                 m_days=m_days,
                 m_topk=m_topk,
+                c_days=c_days,
                 inst=inst,
                 cap_topl=cap_topl,
                 v_days=v_days,
@@ -1218,7 +1222,17 @@ def create_app() -> Flask:
                     metrics.setdefault(code, {})["name"] = str(r["name"])
                     metrics.setdefault(code, {})["inst_net"] = int(r["net"])
 
-            # 5) 市值 TopL
+            # 5) 法人連續買超（最近 C 個交易日）
+            if used["inst_consecutive"] and c_days and inst:
+                consecutive_rows = select_institution_consecutive_buy(conn, days=c_days, inst=inst)
+                codes = {str(r["code"]) for r in consecutive_rows}
+                code_set = codes if code_set is None else (code_set & codes)
+                for r in consecutive_rows:
+                    code = str(r["code"])
+                    metrics.setdefault(code, {})["name"] = str(r["name"])
+                    metrics.setdefault(code, {})["inst_consecutive_days"] = int(r["consecutive_days"])
+
+            # 6) 市值 TopL
             if used["cap"] and cap_topl:
                 cap_date = latest_market_cap_date(conn)
                 if not cap_date:
@@ -1252,6 +1266,8 @@ def create_app() -> Flask:
             note = note or "你有設定量能提升條件，但近 2V 個交易日成交量資料可能不足；請先按上方『更新DB』補齊。"
         if used["turn"] and t_days and t_topk and not results and asof is not None:
             note = note or "你有設定成交值條件，但近 T 個交易日資料可能不足；請先按上方『更新DB』補齊。"
+        if used["inst_consecutive"] and c_days and not results and asof is not None:
+            note = note or "你有設定連續買超條件，但近 C 個交易日法人資料可能不足；請先按上方『更新DB』補齊。"
 
         return render_template(
             "strategy.html",
@@ -1260,6 +1276,7 @@ def create_app() -> Flask:
             n_topk=n_topk,
             m_days=m_days,
             m_topk=m_topk,
+            c_days=c_days,
             inst=inst,
             cap_topl=cap_topl,
             v_days=v_days,

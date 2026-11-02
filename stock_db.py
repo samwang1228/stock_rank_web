@@ -472,6 +472,50 @@ def select_institution_net_buy_rank(
     return rows, used_dates
 
 
+def select_institution_consecutive_buy(
+    conn: sqlite3.Connection,
+    *,
+    days: int,
+    inst: str,
+) -> list[sqlite3.Row]:
+    """回傳最新 N 個交易日每天都買超的上市股票。"""
+
+    inst = (inst or "").strip().lower()
+    col_map = {
+        "foreign": "foreign_net",
+        "trust": "trust_net",
+        "dealer": "dealer_net",
+        "total": "total_net",
+        "foreign_trust": "foreign_net + trust_net",
+    }
+    col = col_map.get(inst)
+    if not col:
+        raise ValueError(f"Unknown inst: {inst}")
+
+    days_i = int(days)
+    if days_i <= 0:
+        raise ValueError("days must be positive")
+
+    return conn.execute(
+        f"""
+        WITH last_dates AS (
+          SELECT date FROM day_meta ORDER BY date DESC LIMIT ?
+        )
+        SELECT it.code AS code,
+               MAX(it.name) AS name,
+               COUNT(DISTINCT it.date) AS consecutive_days
+        FROM inst_trades it
+        JOIN last_dates ld ON ld.date = it.date
+        WHERE it.market = 'TWSE'
+        GROUP BY it.code
+        HAVING COUNT(DISTINCT it.date) = ?
+           AND SUM(CASE WHEN it.{col} > 0 THEN 1 ELSE 0 END) = ?
+        ORDER BY it.code ASC
+        """,
+        (days_i, days_i, days_i),
+    ).fetchall()
+
+
 def select_institution_trades_for_code(
     conn: sqlite3.Connection,
     *,
