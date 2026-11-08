@@ -96,6 +96,33 @@ CREATE TABLE IF NOT EXISTS watchlist (
     name TEXT NOT NULL,
     sort_order INTEGER NOT NULL
 );
+
+-- 大盤專用資料；不跟個股行情 prune，保留歷史以支援分頁查詢。
+CREATE TABLE IF NOT EXISTS market_overview (
+        date TEXT PRIMARY KEY,
+        index_open REAL,
+        index_high REAL,
+        index_low REAL,
+        index_close REAL,
+        index_volume INTEGER,
+        margin_maintenance REAL,
+        financing_balance INTEGER,
+        financing_change INTEGER,
+        foreign_net INTEGER,
+        trust_net INTEGER,
+        dealer_net INTEGER,
+        futures_short_total INTEGER,
+        futures_short_change INTEGER,
+        vixtwn REAL,
+        financing_change_00631l INTEGER,
+        securities_change_00631l INTEGER,
+        financing_change_0050 INTEGER,
+        securities_change_0050 INTEGER,
+        fetched_at TEXT NOT NULL,
+        source_status TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_overview_date ON market_overview(date DESC);
 """
 
 DEFAULT_WATCHLIST = (
@@ -125,6 +152,17 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(market_overview)")}
+    if "margin_market_value" not in columns:
+        conn.execute("ALTER TABLE market_overview ADD COLUMN margin_market_value INTEGER")
+    for column in (
+        "financing_change_00631l",
+        "securities_change_00631l",
+        "financing_change_0050",
+        "securities_change_0050",
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE market_overview ADD COLUMN {column} INTEGER")
     conn.executemany(
         "INSERT OR IGNORE INTO watchlist(code, name, sort_order) VALUES(?,?,?)",
         DEFAULT_WATCHLIST,
@@ -262,6 +300,42 @@ def list_trading_dates(conn: sqlite3.Connection, limit: int | None = None, *, de
 def latest_trading_date(conn: sqlite3.Connection) -> dt.date | None:
     cur = conn.execute("SELECT date FROM day_meta ORDER BY date DESC LIMIT 1")
     row = cur.fetchone()
+    return _str_to_date(row["date"]) if row else None
+
+
+def upsert_market_overview(conn: sqlite3.Connection, row: dict[str, object]) -> None:
+    """Upsert one calendar date; unavailable sources remain NULL."""
+    columns = (
+        "date", "index_open", "index_high", "index_low", "index_close", "index_volume",
+        "margin_maintenance", "margin_market_value", "financing_balance", "financing_change", "foreign_net",
+        "trust_net", "dealer_net", "futures_short_total", "futures_short_change", "vixtwn",
+        "financing_change_00631l", "securities_change_00631l", "financing_change_0050", "securities_change_0050",
+        "fetched_at", "source_status",
+    )
+    values = tuple(row.get(column) for column in columns)
+    with conn:
+        conn.execute(
+            "INSERT INTO market_overview(" + ",".join(columns) + ") VALUES(" + ",".join("?" for _ in columns) + ") "
+            "ON CONFLICT(date) DO UPDATE SET "
+            + ",".join(f"{column}=excluded.{column}" for column in columns[1:]),
+            values,
+        )
+
+
+def select_market_overview(conn: sqlite3.Connection, *, limit: int = 20, offset: int = 0) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM market_overview WHERE index_close IS NOT NULL ORDER BY date DESC LIMIT ? OFFSET ?",
+        (max(1, int(limit)), max(0, int(offset))),
+    ).fetchall()
+
+
+def market_overview_dates(conn: sqlite3.Connection) -> list[dt.date]:
+    rows = conn.execute("SELECT date FROM market_overview WHERE index_close IS NOT NULL ORDER BY date ASC").fetchall()
+    return [_str_to_date(row["date"]) for row in rows]
+
+
+def latest_market_overview_date(conn: sqlite3.Connection) -> dt.date | None:
+    row = conn.execute("SELECT date FROM market_overview WHERE index_close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
     return _str_to_date(row["date"]) if row else None
 
 

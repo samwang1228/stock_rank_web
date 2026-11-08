@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import os
 import threading
@@ -21,6 +22,8 @@ from stock_db import (
     latest_trading_date,
     latest_market_cap_date,
     list_trading_dates,
+    latest_market_overview_date,
+    select_market_overview,
     select_closes_for_dates,
     select_closes_for_last_n_trading_days,
     select_close_volume_for_dates,
@@ -36,6 +39,7 @@ from stock_db import (
     list_watchlist,
 )
 from sync_data import sync_last_n_trading_days
+from market_data import sync_market_overview
 from tw_market_data import fetch_twse_company_share_info
 
 
@@ -125,6 +129,40 @@ def create_app() -> Flask:
                 sync_state["running"] = False
                 sync_state["finished_at"] = dt.datetime.now().isoformat(timespec="seconds")
                 _log(f"總耗時 {time.time() - t0:.1f}s")
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    market_sync_lock = threading.Lock()
+    market_sync_state: dict[str, object] = {"running": False, "error": None, "latest": None, "logs": []}
+
+    def _market_log(line: str) -> None:
+        logs = market_sync_state.get("logs")
+        if isinstance(logs, list):
+            logs.append(line)
+
+    def _start_market_sync_background() -> None:
+        with market_sync_lock:
+            if bool(market_sync_state.get("running")):
+                return
+            market_sync_state.update(running=True, error=None, latest=None, logs=[])
+
+        def runner() -> None:
+            try:
+                with db_session(db_path) as conn:
+                    latest, errors = sync_market_overview(
+                        conn,
+                        end_date=dt.date.today(),
+                        calendar_days=60,
+                        recent_days=14,
+                        cache_dir=cache_dir,
+                        on_log=_market_log,
+                    )
+                market_sync_state["latest"] = latest.isoformat() if latest else None
+                market_sync_state["error"] = "；".join(errors[-10:]) if errors else None
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                market_sync_state["error"] = str(exc)
+            finally:
+                market_sync_state["running"] = False
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -284,7 +322,35 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
-        return redirect(url_for("gainers"))
+        return redirect(url_for("market"))
+
+    @app.get("/market")
+    def market():
+        with db_session(db_path) as conn:
+            chart_rows = [dict(row) for row in reversed(select_market_overview(conn, limit=60))]
+            recent_rows = [dict(row) for row in select_market_overview(conn, limit=5)]
+            latest = latest_market_overview_date(conn)
+            unavailable = sorted({part for row in recent_rows for part in str(row.get("source_status") or "").split("；") if part})
+        return render_template(
+            "market.html",
+            latest=latest,
+            chart_data=json.dumps(chart_rows, ensure_ascii=False, default=str),
+            rows=recent_rows,
+            unavailable=unavailable,
+            sync_state=market_sync_state,
+        )
+
+    @app.get("/market/data")
+    def market_data_api():
+        page = max(0, int(request.args.get("page", "0")))
+        with db_session(db_path) as conn:
+            rows = [dict(row) for row in select_market_overview(conn, limit=20, offset=page * 20)]
+        return jsonify({"page": page, "rows": rows, "has_next": len(rows) == 20})
+
+    @app.post("/market/update")
+    def update_market():
+        _start_market_sync_background()
+        return redirect(url_for("market"))
 
     @app.post("/sync")
     def sync():

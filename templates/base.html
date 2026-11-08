@@ -81,6 +81,7 @@
   <body>
     <div class="container">
       <nav class="row card">
+        <a href="{{ url_for('market') }}">大盤</a>
         <a href="{{ url_for('gainers') }}">漲幅排行</a>
         <a href="{{ url_for('turnover') }}">成交值排行</a>
         <a href="{{ url_for('vol_up') }}">量能提升</a>
@@ -104,5 +105,6 @@
 
       {% block content %}{% endblock %}
     </div>
+    {% block scripts %}{% endblock %}
   </body>
 </html>

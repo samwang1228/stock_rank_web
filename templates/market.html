@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block head %}
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    .market-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .market-card { min-width:0; }
+    .market-card h3 { margin:0 0 8px; font-size:17px; }
+    .expand { float:right; padding:4px 8px; }
+    .chart { min-height:560px; }
+    .modal { display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.42); padding:5vh 4vw; }
+    .modal.open { display:block; }
+    .modal-panel { background:#fff; max-width:1100px; height:90vh; margin:auto; padding:18px; border-radius:10px; display:flex; flex-direction:column; }
+    .modal-head { display:flex; justify-content:space-between; align-items:center; }
+    .modal-head h2 { margin:0; }
+    .close { font-size:22px; padding:2px 9px; }
+    .modal-table { overflow:auto; flex:1; margin-top:12px; }
+    .pager { display:flex; justify-content:center; gap:12px; padding-top:12px; }
+    .pager button:disabled { opacity:.4; cursor:not-allowed; }
+    @media (max-width:800px) { .market-grid { grid-template-columns:1fr; } .chart { min-height:430px; } }
+  </style>
+{% endblock %}
+{% block content %}
+  <div class="row" style="justify-content:space-between;">
+    <div>
+      <h2 style="margin-bottom:2px;">大盤</h2>
+      <span class="muted">資料截至：{{ latest or '尚無資料' }}</span>
+    </div>
+    <form method="post" action="{{ url_for('update_market') }}"><button type="submit">更新大盤資料</button></form>
+  </div>
+  {% if sync_state.running %}<p class="muted">大盤資料更新中，重新整理可查看進度。</p>{% endif %}
+  {% if sync_state.error %}<p class="negative">部分資料無法抓取：{{ sync_state.error }}</p>{% endif %}
+  {% if unavailable %}<p class="muted">目前資料源未提供：{{ unavailable|join('、') }}。欄位會保留空白，不影響其他資料。</p>{% endif %}
+
+  <section class="card chart" style="margin-top:12px;">
+    <h3>近 60 個交易日加權指數 K 棒與成交量</h3>
+    <div id="market-chart" style="height:500px;"></div>
+  </section>
+
+  <div class="market-grid" style="margin-top:14px;">
+    <section class="card market-card"><button class="expand" data-kind="margin">↗</button><h3>近五日大盤融資</h3><div id="margin-preview"></div></section>
+    <section class="card market-card"><button class="expand" data-kind="institution">↗</button><h3>近五日三大法人</h3><div id="institution-preview"></div></section>
+    <section class="card market-card"><button class="expand" data-kind="futures">↗</button><h3>近五日外資台指期淨空單</h3><div id="futures-preview"></div></section>
+    <section class="card market-card"><button class="expand" data-kind="etf_margin">↗</button><h3>近五日 00631L / 0050 融資融券變化</h3><div id="etf_margin-preview"></div></section>
+  </div>
+
+  <div id="market-modal" class="modal" role="dialog" aria-modal="true">
+    <div class="modal-panel">
+      <div class="modal-head"><h2 id="modal-title"></h2><button class="close" aria-label="關閉">×</button></div>
+      <div id="modal-table" class="modal-table"></div>
+      <div class="pager"><button id="prev-page">←</button><span id="page-label">第 1 頁</span><button id="next-page">→</button></div>
+    </div>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+const chartRows = {{ chart_data|safe }};
+const previewRows = {{ rows|tojson }};
+const configs = {
+  margin: {title:'大盤融資維持率與融資', columns:[['date','日期'],['margin_maintenance','融資維持率'],['financing_balance','融資總額（億元）'],['financing_change','當日增減（億元）']]},
+  institution: {title:'集中市場三大法人買賣金額', columns:[['date','日期'],['foreign_net','外資（億元）'],['trust_net','投信（億元）'],['dealer_net','自營商（億元）']]},
+  futures: {title:'外資台指期淨空單口數', columns:[['date','日期'],['futures_short_total','淨空單口數'],['futures_short_change','單日變化']]},
+  etf_margin: {title:'00631L / 0050 融資融券當日變化', columns:[['date','日期'],['financing_change_00631l','00631L 融資'],['securities_change_00631l','00631L 融券'],['financing_change_0050','0050 融資'],['securities_change_0050','0050 融券']]}
+};
+function formatValue(key, value) {
+  if (value === null || value === undefined || value === '') return '<span class="muted">無資料</span>';
+  if (key === 'margin_maintenance') return Number(value).toFixed(2);
+  if (key === 'financing_balance' || key === 'financing_change') return (Number(value) / 100000).toFixed(2);
+  if (key === 'foreign_net' || key === 'trust_net' || key === 'dealer_net') return (Number(value) / 100000000).toFixed(2);
+  return Number(value).toLocaleString('zh-TW');
+}
+function renderTable(target, kind, rows) {
+  const config = configs[kind];
+  let html = '<div class="table-card"><table><thead><tr>' + config.columns.map(c => `<th>${c[1]}</th>`).join('') + '</tr></thead><tbody>';
+  html += rows.map(row => '<tr>' + config.columns.map(c => `<td class="num">${c[0] === 'date' ? row[c[0]] : formatValue(c[0], row[c[0]])}</td>`).join('') + '</tr>').join('');
+  html += '</tbody></table></div>';
+  document.querySelector(target).innerHTML = html;
+}
+Object.keys(configs).forEach(kind => renderTable('#' + kind + '-preview', kind, previewRows.slice(0, 5)));
+
+if (chartRows.length) {
+  const dates = chartRows.map(r => r.date), open = chartRows.map(r => r.index_open), high = chartRows.map(r => r.index_high), low = chartRows.map(r => r.index_low), close = chartRows.map(r => r.index_close), volume = chartRows.map(r => r.index_volume);
+  Plotly.newPlot('market-chart', [
+    {x:dates, open:open, high:high, low:low, close:close, type:'candlestick', name:'加權指數', increasing_line_color:'#b42318', increasing_fillcolor:'#b42318', decreasing_line_color:'#087443', decreasing_fillcolor:'#087443'},
+    {x:dates, y:volume, type:'bar', name:'成交量', yaxis:'y2', marker:{color:'#94a3b8'}}
+  ], {margin:{l:55,r:55,t:12,b:45}, hovermode:'x unified', yaxis:{title:'指數',domain:[0.3,1]}, yaxis2:{title:'成交量',domain:[0,0.22],anchor:'x'}, legend:{orientation:'h'}, xaxis:{type:'category'}}, {responsive:true, displaylogo:false});
+} else document.getElementById('market-chart').innerHTML = '<p class="muted">尚無大盤資料，請按「更新大盤資料」。</p>';
+
+let activeKind = null, page = 0;
+const modal = document.getElementById('market-modal');
+async function loadModal() {
+  const response = await fetch(`{{ url_for('market_data_api') }}?page=${page}`);
+  const payload = await response.json();
+  renderTable('#modal-table', activeKind, payload.rows);
+  document.getElementById('modal-title').textContent = configs[activeKind].title;
+  document.getElementById('page-label').textContent = `第 ${page + 1} 頁`;
+  document.getElementById('prev-page').disabled = page === 0;
+  document.getElementById('next-page').disabled = !payload.has_next;
+}
+document.querySelectorAll('.expand').forEach(button => button.addEventListener('click', () => { activeKind=button.dataset.kind; page=0; modal.classList.add('open'); loadModal(); }));
+document.querySelector('.close').addEventListener('click', () => modal.classList.remove('open'));
+modal.addEventListener('click', event => { if (event.target === modal) modal.classList.remove('open'); });
+document.getElementById('prev-page').addEventListener('click', () => { if (page > 0) { page--; loadModal(); } });
+document.getElementById('next-page').addEventListener('click', () => { page++; loadModal(); });
+</script>
+{% endblock %}
