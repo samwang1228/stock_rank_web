@@ -86,15 +86,12 @@ def _fetch_yahoo_institutional(cache_dir: str) -> dict[str, dict[str, int]]:
     """
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, "market_yahoo_institutional.html")
-    if os.path.exists(cache_path):
-        with open(cache_path, "r", encoding="utf-8") as handle:
-            html = handle.read()
-    else:
-        request = urllib.request.Request(YAHOO_INSTITUTIONAL_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            html = response.read().decode("utf-8", errors="replace")
-        with open(cache_path, "w", encoding="utf-8") as handle:
-            handle.write(html)
+    # 法人頁面會在收盤後更新；舊快取不能沿用，否則當日資料會一直缺少。
+    request = urllib.request.Request(YAHOO_INSTITUTIONAL_URL, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        html = response.read().decode("utf-8", errors="replace")
+    with open(cache_path, "w", encoding="utf-8") as handle:
+        handle.write(html)
 
     marker = '"StockInstitutionalTradingStore":'
     start = html.find(marker)
