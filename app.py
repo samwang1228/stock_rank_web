@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import pandas as pd
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+from data.tw_sector_map import TW_SECTOR_MAP
 from industry import industry as industry_map
 from monthly_revenue_exporter import MonthlyRevenueExporter
 from stock_db import (
@@ -54,6 +55,94 @@ class ReturnRow:
     name: str
     close: float
     returns: dict[int, float | None]
+
+
+def _build_industry_data(conn) -> tuple[list[dict[str, object]], dict[str, list[dict[str, object]]], dt.date | None]:
+    dates = list_trading_dates(conn, limit=61, desc=True)
+    if not dates:
+        return [], {}, None
+
+    latest = dates[0]
+    previous = dates[1] if len(dates) > 1 else None
+    used_dates = list(reversed(dates))
+    raw = select_close_volume_for_dates(conn, used_dates)
+    by_code_date: dict[str, dict[str, tuple[float, int, str]]] = {}
+    for row in raw:
+        code = str(row["code"])
+        by_code_date.setdefault(code, {})[str(row["date"])] = (
+            float(row["close"]),
+            int(row["volume"]),
+            str(row["name"]),
+        )
+
+    latest_s = latest.isoformat()
+    previous_s = previous.isoformat() if previous else None
+    windows = (1, 3, 7, 14, 30, 60)
+    past_by_window = {
+        window: dates[window].isoformat()
+        for window in windows
+        if len(dates) > window
+    }
+    summary_rows: list[dict[str, object]] = []
+    detail_rows: dict[str, list[dict[str, object]]] = {}
+
+    for sector, definition in TW_SECTOR_MAP.items():
+        stocks = definition["stocks"]
+        sector_value_by_date = {date.isoformat(): 0.0 for date in used_dates}
+        details: list[dict[str, object]] = []
+        for code, configured_name in stocks.items():
+            history = by_code_date.get(code, {})
+            current = history.get(latest_s)
+            if not current:
+                continue
+            close, volume, db_name = current
+            for date_s, (day_close, day_volume, _) in history.items():
+                if date_s in sector_value_by_date:
+                    sector_value_by_date[date_s] += day_close * day_volume
+
+            returns: dict[str, float | None] = {}
+            for window in windows:
+                past = history.get(past_by_window.get(window, ""))
+                returns[str(window)] = (
+                    (close / past[0] - 1.0) * 100.0
+                    if past and past[0] != 0
+                    else None
+                )
+            details.append(
+                {
+                    "code": code,
+                    "name": db_name or configured_name,
+                    "returns": returns,
+                }
+            )
+
+        latest_value = sector_value_by_date[latest_s]
+        volume_changes = {
+            window: (
+                (latest_value - sector_value_by_date[dates[window].isoformat()]) / latest_value
+                if latest_value > 0 and len(dates) > window
+                else None
+            )
+            for window in (3, 7, 14, 30)
+        }
+        summary_rows.append(
+            {
+                "sector": sector,
+                "description": definition["description"],
+                "stock_count": len(stocks),
+                "available_count": len(details),
+                "volume_change": (
+                    (latest_value - sector_value_by_date[previous_s]) / latest_value
+                    if previous_s and latest_value > 0
+                    else None
+                ),
+                "avg_volume_change": volume_changes,
+            }
+        )
+        detail_rows[sector] = details
+
+    summary_rows.sort(key=lambda row: float(row["volume_change"] or 0), reverse=True)
+    return summary_rows, detail_rows, latest
 
 
 def _ma(values: list[float], window: int) -> float | None:
@@ -331,6 +420,7 @@ def create_app() -> Flask:
             recent_rows = [dict(row) for row in select_market_overview(conn, limit=5)]
             latest = latest_market_overview_date(conn)
             unavailable = sorted({part for row in recent_rows for part in str(row.get("source_status") or "").split("；") if part})
+            industry_rows, industry_details, industry_latest = _build_industry_data(conn)
         return render_template(
             "market.html",
             latest=latest,
@@ -338,6 +428,9 @@ def create_app() -> Flask:
             rows=recent_rows,
             unavailable=unavailable,
             sync_state=market_sync_state,
+            industry_rows=industry_rows,
+            industry_details=industry_details,
+            industry_latest=industry_latest,
         )
 
     @app.get("/market/data")

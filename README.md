@@ -45,6 +45,8 @@ PORT=5001 /Users/wangshaocheng/anaconda3/envs/stock/bin/python app.py
 7. 法人買超：提供不同天數台股法人買超排名
 8. 市值排名：提供台股市值排行
 9. 策略：可以根據上述策略找出符合共通條件的股票
+10. 大盤：提供外資台指期淨空單口數、大盤融資變化、融資維持率、三大法人台股總買賣超
+11. 產業(在大盤頁面)：會列出每個產業的總成交值變化以及該個股的個別漲幅
 - CLI 腳本：簡單篩選（保留）
 
 ## 資料來源：
@@ -101,7 +103,8 @@ PORT=5001 python app.py
 ## Screenshots
 ### 大盤數據
 ![大盤數據](img/TAIEX.png)
-
+![產業數據](img/industry.png)
+![產業個股](img/industry_stock_price.png)
 ### 漲幅排行
 
 ![近 N 交易日漲幅排行](img/Topk.png)

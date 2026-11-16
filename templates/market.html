@@ -14,6 +14,12 @@
     .modal-head h2 { margin:0; }
     .close { font-size:22px; padding:2px 9px; }
     .modal-table { overflow:auto; flex:1; margin-top:12px; }
+    .industry-table { overflow:auto; }
+    .industry-table th[data-sort-key] { cursor:pointer; }
+    .industry-table th[data-sort-key]:hover { background:#e9e9e9; }
+    .industry-table tbody tr { cursor:pointer; }
+    .industry-table tbody tr:hover { background:#f0f0f0; }
+    .industry-note { margin:0 0 10px; }
     .pager { display:flex; justify-content:center; gap:12px; padding-top:12px; }
     .pager button:disabled { opacity:.4; cursor:not-allowed; }
     @media (max-width:800px) { .market-grid { grid-template-columns:1fr; } .chart { min-height:430px; } }
@@ -43,6 +49,30 @@
     <section class="card market-card"><button class="expand" data-kind="etf_margin">↗</button><h3>近五日 00631L / 0050 融資融券變化</h3><div id="etf_margin-preview"></div></section>
   </div>
 
+  <section class="card" style="margin-top:14px;">
+    <h3 style="margin:0 0 4px;">自訂產業</h3>
+    <p class="muted industry-note">資料截至：{{ industry_latest or '尚無資料' }}；點選產業查看個股 1、3、7、14、30、60 日漲幅</p>
+    <div class="industry-table">
+      <table>
+        <thead><tr><th data-sort-key="sector">產業</th><th data-sort-key="available" class="num">可用檔數</th><th data-sort-key="day" class="num">成交值變化</th><th data-sort-key="3" class="num">成交值變化 3日</th><th data-sort-key="7" class="num">成交值變化 7日</th><th data-sort-key="14" class="num">成交值變化 14日</th><th data-sort-key="30" class="num">成交值變化 30日</th></tr></thead>
+        <tbody>
+          {% for row in industry_rows %}
+          <tr class="industry-row" data-sector="{{ row.sector }}" data-available="{{ row.available_count }}" data-day="{{ row.volume_change if row.volume_change is not none else '' }}" data-3="{{ row.avg_volume_change[3] if row.avg_volume_change[3] is not none else '' }}" data-7="{{ row.avg_volume_change[7] if row.avg_volume_change[7] is not none else '' }}" data-14="{{ row.avg_volume_change[14] if row.avg_volume_change[14] is not none else '' }}" data-30="{{ row.avg_volume_change[30] if row.avg_volume_change[30] is not none else '' }}">
+            <td><strong>{{ row.sector }}</strong><br><span class="muted">{{ row.description }}</span></td>
+            <td>{{ row.available_count }}/{{ row.stock_count }}</td>
+            <td class="num">{% if row.volume_change is not none %}{{ '{:+.2%}'.format(row.volume_change) }}{% else %}無資料{% endif %}</td>
+            {% for window in (3, 7, 14, 30) %}
+            <td class="num">{% set change = row.avg_volume_change[window] %}{% if change is not none %}{{ '{:+.2%}'.format(change) }}{% else %}無資料{% endif %}</td>
+            {% endfor %}
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="muted">尚無個股行情資料。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <div id="market-modal" class="modal" role="dialog" aria-modal="true">
     <div class="modal-panel">
       <div class="modal-head"><h2 id="modal-title"></h2><button class="close" aria-label="關閉">×</button></div>
@@ -55,6 +85,8 @@
 <script>
 const chartRows = {{ chart_data|safe }};
 const previewRows = {{ rows|tojson }};
+const industryDetails = {{ industry_details|tojson }};
+const klineUrl = {{ url_for('kline')|tojson }};
 const configs = {
   margin: {title:'大盤融資維持率與融資', columns:[['date','日期'],['margin_maintenance','融資維持率'],['financing_balance','融資總額（億元）'],['financing_change','當日增減（億元）']]},
   institution: {title:'集中市場三大法人買賣金額', columns:[['date','日期'],['foreign_net','外資（億元）'],['trust_net','投信（億元）'],['dealer_net','自營商（億元）']]},
@@ -75,7 +107,50 @@ function renderTable(target, kind, rows) {
   html += '</tbody></table></div>';
   document.querySelector(target).innerHTML = html;
 }
+function renderIndustryDetails(sector) {
+  const windows = [['1','1日漲幅'],['3','3日漲幅'],['7','7日漲幅'],['14','14日漲幅'],['30','30日漲幅'],['60','60日漲幅']];
+  const rows = industryDetails[sector] || [];
+  let html = '<div class="table-card"><table><thead><tr><th>名字</th><th>ID</th>' + windows.map(c => `<th class="num">${c[1]}</th>`).join('') + '</tr></thead><tbody>';
+  html += rows.map(row => {
+    const stockUrl = `${klineUrl}?code=${encodeURIComponent(row.code)}`;
+    return '<tr><td><a href="' + stockUrl + '">' + row.name + '</a></td><td><a href="' + stockUrl + '">' + row.code + '</a></td>' + windows.map(c => {
+    const value = row.returns[c[0]];
+    const cls = value > 0 ? 'positive' : value < 0 ? 'negative' : '';
+    return `<td class="num ${cls}">${value === null ? '<span class="muted">無資料</span>' : `${value >= 0 ? '+' : ''}${Number(value).toFixed(2)}%`}</td>`;
+    }).join('') + '</tr>';
+  }).join('');
+  html += '</tbody></table></div>';
+  document.getElementById('modal-title').textContent = sector;
+  document.getElementById('modal-table').innerHTML = html;
+  document.querySelector('.pager').style.display = 'none';
+}
 Object.keys(configs).forEach(kind => renderTable('#' + kind + '-preview', kind, previewRows.slice(0, 5)));
+
+document.querySelectorAll('.industry-row').forEach(row => row.addEventListener('click', () => {
+  renderIndustryDetails(row.dataset.sector);
+  modal.classList.add('open');
+}));
+
+const industryBody = document.querySelector('.industry-table tbody');
+const industryHeaders = document.querySelectorAll('.industry-table th[data-sort-key]');
+const industrySortState = {};
+industryHeaders.forEach(header => header.addEventListener('click', event => {
+  event.stopPropagation();
+  const key = header.dataset.sortKey;
+  industrySortState[key] = industrySortState[key] === 'desc' ? 'asc' : 'desc';
+  const direction = industrySortState[key] === 'desc' ? -1 : 1;
+  const rows = [...industryBody.querySelectorAll('.industry-row')];
+  rows.sort((a, b) => {
+    if (key === 'sector') return a.dataset.sector.localeCompare(b.dataset.sector, 'zh-Hant') * direction;
+    const aValue = Number(a.dataset[key]);
+    const bValue = Number(b.dataset[key]);
+    if (Number.isNaN(aValue) && Number.isNaN(bValue)) return 0;
+    if (Number.isNaN(aValue)) return 1;
+    if (Number.isNaN(bValue)) return -1;
+    return (aValue - bValue) * direction;
+  });
+  rows.forEach(row => industryBody.appendChild(row));
+}));
 
 if (chartRows.length) {
   const dates = chartRows.map(r => r.date), open = chartRows.map(r => r.index_open), high = chartRows.map(r => r.index_high), low = chartRows.map(r => r.index_low), close = chartRows.map(r => r.index_close), volume = chartRows.map(r => r.index_volume);
@@ -90,6 +165,7 @@ const modal = document.getElementById('market-modal');
 async function loadModal() {
   const response = await fetch(`{{ url_for('market_data_api') }}?page=${page}`);
   const payload = await response.json();
+  document.querySelector('.pager').style.display = '';
   renderTable('#modal-table', activeKind, payload.rows);
   document.getElementById('modal-title').textContent = configs[activeKind].title;
   document.getElementById('page-label').textContent = `第 ${page + 1} 頁`;
@@ -97,8 +173,8 @@ async function loadModal() {
   document.getElementById('next-page').disabled = !payload.has_next;
 }
 document.querySelectorAll('.expand').forEach(button => button.addEventListener('click', () => { activeKind=button.dataset.kind; page=0; modal.classList.add('open'); loadModal(); }));
-document.querySelector('.close').addEventListener('click', () => modal.classList.remove('open'));
-modal.addEventListener('click', event => { if (event.target === modal) modal.classList.remove('open'); });
+document.querySelector('.close').addEventListener('click', () => { modal.classList.remove('open'); document.querySelector('.pager').style.display = ''; });
+modal.addEventListener('click', event => { if (event.target === modal) { modal.classList.remove('open'); document.querySelector('.pager').style.display = ''; } });
 document.getElementById('prev-page').addEventListener('click', () => { if (page > 0) { page--; loadModal(); } });
 document.getElementById('next-page').addEventListener('click', () => { page++; loadModal(); });
 </script>
