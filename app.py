@@ -119,8 +119,10 @@ def _build_industry_data(conn) -> tuple[list[dict[str, object]], dict[str, list[
         latest_value = sector_value_by_date[latest_s]
         volume_changes = {
             window: (
-                (latest_value - sector_value_by_date[dates[window].isoformat()]) / latest_value
-                if latest_value > 0 and len(dates) > window
+                (latest_value - sector_value_by_date[dates[window].isoformat()])
+                / sector_value_by_date[dates[window].isoformat()] 
+                if len(dates) > window
+                and sector_value_by_date[dates[window].isoformat()] > 0
                 else None
             )
             for window in (3, 7, 14, 30)
@@ -132,8 +134,10 @@ def _build_industry_data(conn) -> tuple[list[dict[str, object]], dict[str, list[
                 "stock_count": len(stocks),
                 "available_count": len(details),
                 "volume_change": (
-                    (latest_value - sector_value_by_date[previous_s]) / latest_value
-                    if previous_s and latest_value > 0
+                    (latest_value - sector_value_by_date[previous_s])
+                    / sector_value_by_date[previous_s]
+                    if previous_s
+                    and sector_value_by_date[previous_s] > 0
                     else None
                 ),
                 "avg_volume_change": volume_changes,
