@@ -76,11 +76,16 @@ def sync_last_n_trading_days(
     def inst_attempted(d: dt.date, *, market: str) -> bool:
         market_u = str(market).upper()
         row = conn.execute(
-            "SELECT 1 FROM inst_fetch_meta WHERE date=? AND market=? LIMIT 1",
+            "SELECT count, status FROM inst_fetch_meta WHERE date=? AND market=? LIMIT 1",
             (d.isoformat(), market_u),
         ).fetchone()
         if row is not None:
-            return True
+            count = int(row["count"] or 0)
+            status = str(row["status"] or "updated")
+            if count > 0:
+                return True
+            # pending：當日 18:30 前抓到 0 筆，等待下次更新重抓
+            return status != "pending"
         # Backward compatibility: older DB only had TWSE attempt tracking.
         if market_u == "TWSE":
             row2 = conn.execute(
@@ -91,12 +96,23 @@ def sync_last_n_trading_days(
         return False
 
     def mark_inst_attempt(d: dt.date, *, market: str, count: int) -> None:
+        now_local = dt.datetime.now()
         now_utc = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        count_i = int(count)
+
+        if count_i > 0:
+            status = "updated"
+        elif d == end_date and now_local.time() < dt.time(18, 30):
+            status = "pending"
+        else:
+            status = "updated"
+
         with conn:
             conn.execute(
-                "INSERT INTO inst_fetch_meta(date, market, fetched_at, count) VALUES(?,?,?,?) "
-                "ON CONFLICT(date, market) DO UPDATE SET fetched_at=excluded.fetched_at, count=excluded.count",
-                (d.isoformat(), str(market).upper(), now_utc, int(count)),
+                "INSERT INTO inst_fetch_meta(date, market, fetched_at, count, status) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(date, market) DO UPDATE SET "
+                "fetched_at=excluded.fetched_at, count=excluded.count, status=excluded.status",
+                (d.isoformat(), str(market).upper(), now_utc, count_i, status),
             )
 
     def is_known_non_trading(d: dt.date) -> bool:
@@ -136,20 +152,20 @@ def sync_last_n_trading_days(
             collected.append(day)
 
             # 法人資料只針對「最新幾天」補齊，且只嘗試一次（避免每次 sync 都重抓同一天）
-            if len(collected) <= 5:
-                if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
-                    log(f"補抓法人：{day.isoformat()}（TWSE T86）")
-                    inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-                    if inst_trades:
-                        upsert_institution_trades(conn, day, inst_trades)
-                    mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
+            # pending 資料重試；updated 資料只記一次，不重抓。
+            if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
+                log(f"補抓法人：{day.isoformat()}（TWSE T86）")
+                inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                if inst_trades:
+                    upsert_institution_trades(conn, day, inst_trades)
+                mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
 
-                if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
-                    log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
-                    tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-                    if tpex_trades:
-                        upsert_institution_trades(conn, day, tpex_trades)
-                    mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
+            if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
+                log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
+                tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                if tpex_trades:
+                    upsert_institution_trades(conn, day, tpex_trades)
+                mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
             continue
 
         # 若已有其中一邊的行情資料，但另一邊缺漏，補抓缺的市場。
@@ -171,20 +187,19 @@ def sync_last_n_trading_days(
                 collected.append(day)
                 log(f"寫入補缺：TWSE={counts_after[0]}、TPEX={counts_after[1]}")
 
-                if len(collected) <= 5:
-                    if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
-                        log(f"補抓法人：{day.isoformat()}（TWSE T86）")
-                        inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-                        if inst_trades:
-                            upsert_institution_trades(conn, day, inst_trades)
-                        mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
+                if not has_inst_trades(day, market="TWSE") and not inst_attempted(day, market="TWSE"):
+                    log(f"補抓法人：{day.isoformat()}（TWSE T86）")
+                    inst_trades = fetch_twse_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                    if inst_trades:
+                        upsert_institution_trades(conn, day, inst_trades)
+                    mark_inst_attempt(day, market="TWSE", count=len(inst_trades))
 
-                    if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
-                        log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
-                        tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
-                        if tpex_trades:
-                            upsert_institution_trades(conn, day, tpex_trades)
-                        mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
+                if not has_inst_trades(day, market="TPEX") and not inst_attempted(day, market="TPEX"):
+                    log(f"補抓法人：{day.isoformat()}（TPEX 3inst）")
+                    tpex_trades = fetch_tpex_institution_trades(day, cache_dir=cache_dir, use_cache=use_cache)
+                    if tpex_trades:
+                        upsert_institution_trades(conn, day, tpex_trades)
+                    mark_inst_attempt(day, market="TPEX", count=len(tpex_trades))
 
             continue
 

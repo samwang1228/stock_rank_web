@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS inst_fetch_meta (
     market TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     count INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'updated',
     PRIMARY KEY (date, market)
 );
 
@@ -152,6 +153,18 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    inst_fetch_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(inst_fetch_meta)")}
+    if "status" not in inst_fetch_columns:
+        conn.execute("ALTER TABLE inst_fetch_meta ADD COLUMN status TEXT NOT NULL DEFAULT 'updated'")
+
+    # Reconcile legacy zero-count attempts against the rows actually stored.
+    conn.execute(
+        "UPDATE inst_fetch_meta SET count=(SELECT COUNT(*) FROM inst_trades "
+        "WHERE inst_trades.date=inst_fetch_meta.date AND inst_trades.market=inst_fetch_meta.market), "
+        "status='updated' WHERE EXISTS (SELECT 1 FROM inst_trades "
+        "WHERE inst_trades.date=inst_fetch_meta.date AND inst_trades.market=inst_fetch_meta.market)"
+    )
+
     columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(market_overview)")}
     if "margin_market_value" not in columns:
         conn.execute("ALTER TABLE market_overview ADD COLUMN margin_market_value INTEGER")
@@ -552,7 +565,7 @@ def select_institution_consecutive_buy(
     days: int,
     inst: str,
 ) -> list[sqlite3.Row]:
-    """回傳最新 N 個交易日每天都買超的上市股票。"""
+    """回傳 day_meta 最新 N 個交易日每天都買超的上市股票。"""
 
     inst = (inst or "").strip().lower()
     col_map = {
@@ -573,7 +586,9 @@ def select_institution_consecutive_buy(
     return conn.execute(
         f"""
         WITH last_dates AS (
-          SELECT date FROM day_meta ORDER BY date DESC LIMIT ?
+          SELECT date FROM day_meta
+          ORDER BY date DESC
+          LIMIT ?
         )
         SELECT it.code AS code,
                MAX(it.name) AS name,
@@ -582,11 +597,11 @@ def select_institution_consecutive_buy(
         JOIN last_dates ld ON ld.date = it.date
         WHERE it.market = 'TWSE'
         GROUP BY it.code
-        HAVING COUNT(DISTINCT it.date) = ?
-           AND SUM(CASE WHEN it.{col} > 0 THEN 1 ELSE 0 END) = ?
+        HAVING COUNT(DISTINCT it.date) = (SELECT COUNT(*) FROM last_dates)
+           AND SUM(CASE WHEN it.{col} > 0 THEN 1 ELSE 0 END) = (SELECT COUNT(*) FROM last_dates)
         ORDER BY it.code ASC
         """,
-        (days_i, days_i, days_i),
+        (days_i,),
     ).fetchall()
 
 
