@@ -11,8 +11,8 @@
 
   <form class="row card" method="post" action="{{ url_for('watchlist') }}">
     <input type="hidden" name="action" value="add" />
-    <label>新增股票代號：
-      <input name="code" placeholder="例如 2330" inputmode="numeric" />
+    <label>新增股票代號或名稱：
+      <input name="code" placeholder="例如 2330 或 台積電" />
     </label>
     <button type="submit">新增</button>
   </form>
@@ -26,7 +26,7 @@
         <form method="post" action="{{ url_for('watchlist') }}" style="margin-left:auto;">
           <input type="hidden" name="action" value="delete" />
           <input type="hidden" name="code" value="{{ card.code }}" />
-          <button type="submit">刪除</button>
+          <button type="submit" onclick="return confirm('確定刪除 {{ card.name }}（{{ card.code }}）？');">刪除</button>
         </form>
       </div>
 

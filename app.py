@@ -38,6 +38,7 @@ from stock_db import (
     add_watchlist_code,
     delete_watchlist_code,
     list_watchlist,
+    resolve_watchlist_code,
 )
 from sync_data import sync_last_n_trading_days
 from market_data import sync_market_overview
@@ -774,14 +775,11 @@ def create_app() -> Flask:
                 if action == "delete":
                     delete_watchlist_code(conn, code)
                 elif action == "add":
-                    if not code.isdigit() or not 4 <= len(code) <= 6:
-                        error = "請輸入 4 到 6 碼的股票代號。"
+                    code, name = resolve_watchlist_code(conn, code)
+                    if not code or not name:
+                        error = "找不到此股票代號或名稱，請確認後再試。"
                     else:
-                        name = get_code_name(conn, code)
-                        if not name:
-                            error = "找不到這個股票代號，請先更新 DB。"
-                        else:
-                            add_watchlist_code(conn, code, name)
+                        add_watchlist_code(conn, code, name)
             if error is None:
                 return redirect(url_for("watchlist"))
 

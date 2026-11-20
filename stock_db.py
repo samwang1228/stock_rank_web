@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     sort_order INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS watchlist_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- 大盤專用資料；不跟個股行情 prune，保留歷史以支援分頁查詢。
 CREATE TABLE IF NOT EXISTS market_overview (
         date TEXT PRIMARY KEY,
@@ -176,10 +181,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     ):
         if column not in columns:
             conn.execute(f"ALTER TABLE market_overview ADD COLUMN {column} INTEGER")
-    conn.executemany(
-        "INSERT OR IGNORE INTO watchlist(code, name, sort_order) VALUES(?,?,?)",
-        DEFAULT_WATCHLIST,
-    )
+    initialized = conn.execute(
+        "SELECT 1 FROM watchlist_meta WHERE key='defaults_initialized' LIMIT 1"
+    ).fetchone()
+    if initialized is None:
+        conn.executemany(
+            "INSERT OR IGNORE INTO watchlist(code, name, sort_order) VALUES(?,?,?)",
+            DEFAULT_WATCHLIST,
+        )
+        conn.execute(
+            "INSERT INTO watchlist_meta(key, value) VALUES('defaults_initialized', '1')"
+        )
     conn.commit()
 
 
@@ -748,6 +760,34 @@ def select_market_cap_top(
         (_date_to_str(asof_date), int(limit)),
     )
     return cur.fetchall()
+
+
+def resolve_watchlist_code(conn: sqlite3.Connection, query: str) -> tuple[str | None, str | None]:
+    value = str(query or "").strip()
+    if not value:
+        return None, None
+
+    if value.isdigit():
+        row = conn.execute(
+            "SELECT code, name FROM bars WHERE code=? ORDER BY date DESC LIMIT 1",
+            (value,),
+        ).fetchone()
+        return (str(row["code"]), str(row["name"])) if row else (None, None)
+
+    row = conn.execute(
+        "SELECT code, name FROM bars WHERE name=? ORDER BY date DESC LIMIT 1",
+        (value,),
+    ).fetchone()
+    if row:
+        return str(row["code"]), str(row["name"])
+
+    rows = conn.execute(
+        "SELECT code, name FROM bars WHERE name LIKE ? GROUP BY code ORDER BY date DESC LIMIT 2",
+        (f"%{value}%",),
+    ).fetchall()
+    if len(rows) == 1:
+        return str(rows[0]["code"]), str(rows[0]["name"])
+    return None, None
 
 
 @contextlib.contextmanager
